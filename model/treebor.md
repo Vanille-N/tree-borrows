@@ -477,11 +477,11 @@ assumptions is `noalias` which specifies to what extent a pointer passed as an
 argument to a function aliases with other pointers. In Rust, mutable and shared
 references are both marked `noalias`.
 
-> noalias
+> `noalias`
 
 >> This indicates that memory locations accessed via pointer values based on the argument
 are not also accessed, during the execution of the function, via pointer values not based on
-the argument or return value. This guarantee only holds for memory locations that are modified,
+the argument. This guarantee only holds for memory locations that are modified,
 by any means, during the execution of the function.
 
 > --- from the [LLVM Language Reference Manual](https://llvm.org/docs/LangRef.html)
