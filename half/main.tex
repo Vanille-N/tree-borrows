@@ -1,0 +1,320 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage[small]{caption}
+\usepackage{cite}
+\usepackage{colortbl}
+\usepackage{enumitem}
+\usepackage{framed}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[unicode]{hyperref}
+\usepackage{amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{mathtools}
+\usepackage{subcaption}
+
+\usepackage{listings} % replace with nice syntax hl
+
+\bibliographystyle{plainurl}
+
+\setlength{\OuterFrameSep}{0.3ex}
+\setlength{\FrameSep}{1.5ex}
+
+\newcommand{\myaff}[1]{\,$\cdot$\, {\small #1}\par\smallskip}
+\newcommand{\fakeparagraph}[2]{\par\noindent\textbf{#1}\hspace{1em}#2}
+
+\usepackage{thm-restate}
+\usepackage{cite}
+
+% Problem definition environment
+\newfloat{problemdef}{htbp}{loa}
+\floatname{problemdef}{Problem}
+\newcommand{\problemcaptionkludge}{\rule[-.3\baselineskip]{0pt}{\baselineskip}}
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{observation}[theorem]{Observation}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+\newtheorem{openquestion}[theorem]{Open question}
+
+% Well-parenthesized commands
+\newcommand{\set}[1]{\ensuremath{\left\{#1\right\}}}
+
+\newenvironment{myabstract}
+{\list{}{\listparindent 1.5em%
+        \itemindent    \listparindent
+        \leftmargin    0cm
+        \rightmargin   0cm
+        \parsep        0pt}%
+    \item\relax}
+{\endlist}
+
+\newenvironment{mycover}
+{\list{}{\listparindent 0pt
+        \itemindent    \listparindent
+        \leftmargin    0cm
+        \rightmargin   0cm
+        \parsep        0pt}%
+    \raggedright
+    \item\relax}
+{\endlist}
+
+\begin{document}
+
+\begin{mycover}
+{\huge\bfseries\boldmath Tree Borrows\par}
+\bigskip
+\bigskip
+\bigskip
+
+
+Author: \textbf{Neven Villani}
+\myaff{ENS Paris-Saclay}
+
+~\newline
+
+Advisor: \textbf{Derek Dreyer}
+\myaff{MPI for Software Systems}
+
+
+Advisor: \textbf{Ralf Jung}
+\myaff{ETH Zürich}
+
+
+\end{mycover}
+\medskip
+
+\begin{myabstract}
+\fakeparagraph{Abstract.}
+\end{myabstract}
+\medskip
+
+
+\section{Introduction}
+
+While the purpose of type systems and typing information in programs is usually
+presented as primarily a matter of security (strict type systems can rule out
+at compilation-time a number of bugs), they also enable compilers to generate
+more efficient code in both space and time. Languages with strict compile-time
+type systems can avoid the need for typing metadata at runtime, have fewer
+bounds checks for memory accesses, or even in the case of Rust eliminate the
+need for a runtime garbage collector entirely.
+
+In Rust the type system includes aliasing information (mutability and uniqueness),
+which is to be used not only for safety guarantees, but also to improve
+performance and enable optimizations that are only valid under certain aliasing
+guarantees.
+We aim to define formally what these aliasing guarantees are for Rust, as
+well as show how to check them and use them in proving the validity of compiler
+optimizations.
+
+\subsection{Motivating example}
+
+As a first concrete example, consider the following function:
+\begin{lstlisting}
+fn example1(x: &mut u64, y: &mut u64) -> u64 {
+     let xval = *x; // First read of *x
+     *y = xval + 1;
+     let xval = *x; // Second (redundant ?) read of *x
+     return xval;
+}
+\end{lstlisting}
+
+Because mutable references in Rust are required to be unique, \texttt{x} and
+\texttt{y} must point to disjoint regions of memory. In particular the
+instruction \texttt{*y = xval + 1} constitutes a write to \texttt{y}, but it
+cannot affect the memory covered by \texttt{x}: the value \texttt{*x} is unaffected
+and thus the second read of \texttt{*x} is redundant. This function can be
+optimized to perform one fewer operation by deleting the second line on which
+\texttt{*x} is read, without modifying behavior.
+
+Unfortunately there is a huge gap in the proof above: we have not specified
+by whom, in what contexts or in which manner mutable references are ``required''
+to be unique. This is the purpose of Tree Borrows.
+
+Indeed there exists in Rust the \texttt{unsafe} keywords which
+allows the programmer to bypass certain compiler checks by extending their
+available instruction set: among other things the \texttt{unsafe} keyword allows
+dereferencing raw pointers in the following manner:
+\begin{lstlisting}
+fn context1() {
+    let mut data = 42u64;
+    let data_ptr = &mut data as *mut u64;
+    let x: &mut u64 = unsafe { &mut *data_ptr };
+    let y: &mut u64 = unsafe { &mut *data_ptr };
+    let result = example1(x, y);
+    assert!(result == 43);
+}
+\end{lstlisting}
+Here we use \texttt{unsafe} instructions to obtain two mutable references
+to the same location, and we pass both of them to \texttt{example1}.
+While in this context the original version of \texttt{example1} will return
+\texttt{43}, the optimized version will instead return \texttt{42}.
+
+The optimization shown here is thus not unconditionally valid: violating the
+unicity requirement of mutable references has enabled us to create a program
+in which the optimization does not preserve behavior.
+
+However we want this optimization to be valid, on the grounds of \texttt{context1}
+being a ``bad'' program that violates some assumptions that we want to be able
+to make. This issue is solved by adjusting the operational semantics of Rust
+in a way that declares \texttt{context1} ``Undefined Behavior'' (UB):
+a program exhibits UB when it performs some forbidden instruction.
+Compilers can assume that programs do not exhibit UB, and optimizations are
+not required to preserve the observable behavior of such programs.
+
+There is a tradeoff in what programs can be declared UB, indeed for compiler writers
+the more programs are declared UB the more powerful optimizations can be made and
+the more freedom there is in what is considered a correct compiler, while for language
+users the more programs are declared UB the less the execution closely matches the source
+code. Consider for example the two extreme cases:
+\begin{itemize}
+    \item if all programs are UB then it is valid to compile all programs as an
+        empty sequence of instructions, optimizations are too powerful and the language
+        is so underspecified as to become useless;
+    \item on the other hand if no program is UB, then few to no optimizations are possible.
+\end{itemize}
+Both sides however have an interest in the rules governing UB being clear and well-defined:
+if the rules are vague then compiler writers are unsure what assumptions they can make,
+and language users may accidentally write a program that exhibits UB.
+
+An explicit design decision of Rust is that programs that that do not use the
+\texttt{unsafe} keyword cannot be declared UB. For \texttt{unsafe} to be useful,
+it should also hold that it is not too difficult to write unsafe Rust that is not
+UB. Tree Borrows should thus:
+\begin{itemize}
+    \item \textbf{Declare enough programs UB that some useful optimizations are valid.}
+        We evaluate Tree Borrows on this aspect by providing proofs of validity of such
+        optimizations using the aliasing assumptions allowed by the Tree Borrows semantics.
+    \item \textbf{Declare as little UB as possible in programs that have already been written.}
+        Each program retroactively declared to exhibit UB is a violation of backwards compatibility,
+        we must ensure that these are few and justifiable.
+        To check this aspect we implement the Tree Borrows semantics in the Miri
+        interpreter and run the OS-independent part of the Rust standard library
+        test suite using this semantics. We found very few rejected instances, and
+        the suggested changes were accepted and merged back into the standard library.
+    \item \textbf{Have rules that are simple, consistent and intuitive.}
+        While it is difficult to measure this objectively, we argue that compared
+        to its predecessor Stacked Borrows, Tree Borrows is more consistent in
+        its handling of pointers. In particular a number of bug reports on the
+        Github page of Miri show that users misunderstand some details of the
+        behavior of Stacked Borrows, and we have ensured that such misunderstandings
+        are not present in Tree Borrows.
+    \item \textbf{Be efficient.} In addition to being humanly understandable, Tree Borrows
+        should also be verifiable in practice without too much overhead in Miri.
+        We compare it to benchmarks of Stacked Borrows and observe a noticeable slowdown,
+        but not to the point that it would be an obstacle to the usability of Miri.
+\end{itemize}
+
+\section{Aliasing in Rust}
+
+In this section we explain the features of Rust that we are interacting with --
+mostly the different kinds of pointers available -- and provide an intuition
+for the aliasing constraints they should satisfy.
+
+We call ``safe Rust'' the subset of the complete Rust language (more explicitly called ``unsafe Rust'')
+that does not use the \texttt{unsafe} keyword (and thus does not use any \texttt{unsafe}
+instructions).
+
+\subsection{References and raw pointers}
+
+Rust offers a kind of pointer with more guarantees than its counterpart in most
+languages: references. Written \texttt{\&} (\texttt{let x:~\&T = \&t;}) or
+\texttt{\&mut} (\texttt{let x:~\&mut T = \&mut t;}) for immutable and mutable
+references respectively.
+
+These references should satisfy ``aliasing XOR mutability'': for a given memory
+location, if a mutable reference exists there cannot also be other mutable or
+immutable references. We can have access to either unique write permissions or
+shared read permissions, not both.
+
+
+As a means of interfacing with C code and expressing complex pointer manipulations,
+Rust also offers another type of pointers, called raw pointers, written
+\texttt{*const T} for immutable raw pointers and \texttt{*mut T} for mutable
+raw pointers. There pointers can bypass some requirements of references (there
+can exist multiple \texttt{*mut T} to the same location), but their use is more
+dangerous and must be enclosed by the keyword \texttt{unsafe \{...\}} thus
+their use is usually restricted to situations where they are absolutely necessary.
+
+Although several \texttt{*mut T} can exist simultaneously, it is still forbidden
+for them to coexist with \texttt{\&mut T}.
+
+
+The following snippet shows some conversions between these kinds of pointers:
+\begin{lstlisting}
+let mut data = 42u64;
+let some_mut_ref: &mut u64 = &mut data;
+let const_from_mut: &u64 = &*some_mut_ref;
+let reborrow_mut: &mut u64 = &mut *some_mut_ref;
+let mut_ptr: *mut u64 = &mut *some_mut_ref as *mut u64;
+let ref_from_ptr: &mut u64 = unsafe { &mut *mut_ptr };
+\end{lstlisting}
+
+\section{Blind spots and limitations of existing tools}
+
+\subsection{The Borrow Checker}
+
+The Borrow Checker is a compile-time verification of some aliasing rules, and
+in the presence of safe Rust it is able to guarantee that mutable references
+have exclusive access and that shared references have access to data that will
+not be mutated. However it is in several aspects not fine-grained enough compared
+to the model we want to develop.
+
+\paragraph*{It does not check \texttt{unsafe} code.}
+
+\paragraph*{It cannot use runtime properties.}
+
+\subsection{Stacked Borrows}
+
+\paragraph*{Accesses, not creations, are the actual violations.}
+
+\paragraph*{Reads should not invalidate other Reads.}
+
+\paragraph*{On handling pointee types of unknown size.}
+
+\section{The Tree Borrows aliasing model}
+
+\subsection{A tree of pointers}
+
+\subsection{Permissions and updates}
+
+\section{Tree Borrows implemented}
+
+\subsection{Performance concerns and optimizations}
+
+\subsection{Testing the Rust Standard Library}
+
+\section{Future work}
+
+\subsection{Formalization}
+
+\subsection{Proving optimizations}
+
+
+%%
+%% Bibliography
+%%
+
+\bibliography{literature}
+
+
+\newpage
+\appendix
+
+\end{document}

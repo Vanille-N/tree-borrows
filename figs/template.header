@@ -1,0 +1,11 @@
+\documentclass[10pt]{standalone}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.15}
+\usepackage{mathrsfs}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usetikzlibrary{arrows}
+\pagestyle{empty}
+
+\begin{document}
+
