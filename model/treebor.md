@@ -107,7 +107,7 @@ transitive child of `t1` (including `t1` itself). In all other cases --- which
 include strict transitive parents of `t1` as well as all pointers who do not
 share a branch with `t1` --- we call an access through `t0` a _Foreign Access_.
 
-![](figs/accesses-kinds.pdf)
+![](../figs/accesses-kinds.pdf)
 
 ## 2. Pointer Permissions
 
@@ -218,7 +218,7 @@ it is a Foreign access at `t1`. Based on the type of access (both Child/Foreign
 and Read/Write) and some local information, determine the new permissions for the
 pointer.
 
-![](figs/child-or-foreign.pdf)
+![](../figs/child-or-foreign.pdf)
 
 ### 3.1. Intuition on effects of accesses
 
@@ -411,7 +411,7 @@ becomes `Disabled` and will remain so forever.
 The full automata of how permissions react to accesses can be seen in _Figure ???_.
 For now this is nothing more than the aggregation of everything established in **3.1**.
 
-![](figs/state-machine_noprotect.pdf)
+![](../figs/state-machine_noprotect.pdf)
 
 A possible interpretation of these transitions:
 
@@ -445,29 +445,6 @@ for optimizations: if the consequences of a certain kind of access have already
 been applied to some subtree of the borrow tree, said subtree can be skipped entirely
 from the tree traversal if the next access is also of the same kind.
 
-### 3.3. Accesses outside of initial range
-
-Tree Borrows is capable of handling pointers with unknown size as well as using
-a pointer to access data outside of the range it was reborrowed for.
-
-One such case is
-```rs
-fn main() { unsafe {
-    let data: [u64; 2] = [0, 1];
-    let fst = &mut data[0] as *mut u64;
-    let snd = fst.add(1);
-    ptr::swap(fst, snd);
-} }
-```
-Here the reborrow for `fst` only covers `data[0]`, but `snd` is then derived from
-`fst` and translated outside of its original range. As we still wish to check
-that even for these accesses no aliasing assumptions are violated, we track
-permissions even for locations outside of the range of the initial reborrow.
-
-These permissions outside the range can be initialized lazily rather than as soon
-as the reborrow occurs, because it is costly to immediately add permissions
-on the entire allocation when they will most likely never be actually used by
-a Child access.
 
 ### 3.4. Protectors
 
@@ -602,14 +579,16 @@ entry, we add a Protector to every reference passed as argument (Implementation:
 simply maintain a `HashSet` containing call ids of functions that have not yet
 returned and their reference arguments, and query this set on each transition
 to know if this tag's permissions should follow the protected or unprotected
-version of the transitions).
+version of the transitions). In order to not declare too much UB, we also add
+to each state a boolean field `accessed`, which is initially `false` and becomes
+`true` on the first Child access.
 
 Being protected thus modifies the behavior of pointers in the way described in _Figure ???_.
 
 ![**Model including Protectors**
 Most of the transitions have been left untouched, except how
 `Reserved` behaves under Foreign accesses. Additionally it is UB to lose
-`Write` or `Read` permissions.](figs/state-machine.pdf)
+`Write` or `Read` permissions.](../figs/state-machine.pdf)
 
 Note: we observed earlier that for every kind of access, the corresponding transitions
 are idempotent. The only transitions that have changed and could violate the observation would be
@@ -620,6 +599,33 @@ are idempotent. The only transitions that have changed and could violate the obs
 but for these to happen would require that a protector be added after the tag has already been
 subjected to an access, which is not something that occurs in our model.
 We can thus still rely on the effect of every access being idempotent.
+
+### 3.3. Accesses outside of initial range
+
+Tree Borrows is capable of handling pointers with unknown size as well as using
+a pointer to access data outside of the range it was reborrowed for.
+
+One such case is
+```rs
+fn main() { unsafe {
+    let data: [u64; 2] = [0, 1];
+    let fst = &mut data[0] as *mut u64;
+    let snd = fst.add(1);
+    ptr::swap(fst, snd);
+} }
+```
+Here the reborrow for `fst` only covers `data[0]`, but `snd` is then derived from
+`fst` and translated outside of its original range. As we still wish to check
+that even for these accesses no aliasing assumptions are violated, we track
+permissions even for locations outside of the range of the initial reborrow.
+
+These permissions outside the range can be initialized lazily rather than as soon
+as the reborrow occurs, because it is costly to immediately add permissions
+on the entire allocation when they will most likely never be actually used by
+a Child access.
+
+When a location is accessed
+
 
 #### On whether to propagate loss of permissions.
 

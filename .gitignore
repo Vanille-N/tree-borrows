@@ -1,0 +1,3 @@
+# LaTeX compilation artifacts
+*.aux
+*.log
