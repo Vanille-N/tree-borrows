@@ -249,11 +249,10 @@ Rust also offers another type of pointers, called raw pointers, written
 \texttt{*const T} for immutable raw pointers and \texttt{*mut T} for mutable
 raw pointers. There pointers can bypass some requirements of references (there
 can exist multiple \texttt{*mut T} to the same location), but their use is more
-dangerous and must be enclosed by the keyword \texttt{unsafe \{...\}} thus
-their use is usually restricted to situations where they are absolutely necessary.
-
-Although several \texttt{*mut T} can exist simultaneously, it is still forbidden
-for them to coexist with \texttt{\&mut T}.
+dangerous and dereferencing raw pointers can be done only in blocks marked by
+the keyword \texttt{unsafe \{...\}} thus their use is usually restricted to
+situations where they are absolutely necessary.
+Several \texttt{*mut T} can exist simultaneously.
 
 
 The following snippet shows some conversions between these kinds of pointers:
@@ -266,7 +265,7 @@ let mut_ptr: *mut u64 = &mut *some_mut_ref as *mut u64;
 let ref_from_ptr: &mut u64 = unsafe { &mut *mut_ptr };
 \end{lstlisting}
 
-\section{Blind spots and limitations of existing tools}
+\section{Limitations of existing tools}
 
 \subsection{The Borrow Checker}
 
@@ -276,29 +275,206 @@ have exclusive access and that shared references have access to data that will
 not be mutated. However it is in several aspects not fine-grained enough compared
 to the model we want to develop.
 
-\paragraph*{It does not check \texttt{unsafe} code.}
+We show here that there are both places where strictly adhering to the behavior
+of the Borrow Checker would lead to too little UB and others where there would
+be too much UB.
 
-\paragraph*{It cannot use runtime properties.}
+However in places where Tree Borrows does not follow the same rules as the
+Borrow Checker the following should always hold: code that does not use
+\texttt{unsafe} \textit{and} is accepted by the Borrow Checker should never
+be UB.
+
+\paragraph*{Bypassing the Borrow Checker with \texttt{unsafe} code.}
+The Borrow Checker does not track borrows for raw pointers, so the easiest
+--- but usually incorrect --- way to resolve compilation errors raised by the
+Borrow Checker is to insert round trips to cast references to and from raw
+pointers as follows
+\begin{lstlisting}
+// Rejected by the Borrow Checker.
+// Expected to be UB.
+fn alternate_writes() {
+    let x = &mut 0u64;
+    let y = &mut *x;
+    let z = &mut *x;
+    *y += 1;
+    *z += 1;
+}
+
+// Accepted by the Borrow Checker.
+// Expected to be UB.
+fn alternate_writes_raw() {
+    let x = &mut 0u64;
+    let y = unsafe { &mut *(x as *mut u64) };
+    let z = unsafe { &mut *(x as *mut u64) };
+    *y += 1;
+    *z += 1;
+}
+\end{lstlisting}
+
+Since the explicit purpose of Tree Borrows is to also verify and optimize
+\texttt{unsafe} code, it should be more robust than this. This is both so that
+\texttt{unsafe} code actually gets checked and so that the use of \texttt{unsafe}
+does not completely block all optimizations.
+
+\paragraph*{Borrow conflicts undecidable at compile-time.}
+As we have shown in \texttt{example1} above, whether a function call triggers
+UB is in general dependent on what arguments it receives at runtime. Since the
+usual reason that \texttt{unsafe} code is used in the first place is usually
+that its safety relies on properties undecideable at compile-time, we define
+UB at runtime. If some piece of code is unreachable then it cannot produce UB.
+
+This is however not true of the Borrow Checker, which has to operate at compile-time,
+as shown by the following example
+\begin{lstlisting}
+// Rejected by the Borrow Checker.
+// Expected to not be UB.
+fn unreachable_borrow() {
+    let x = &mut 0u64;
+    let y = &mut *x;
+    if false {
+        let z = &mut *x;
+        *z += 1;
+    }
+    *y += 1;
+}
+\end{lstlisting}
 
 \subsection{Stacked Borrows}
 
-\paragraph*{Accesses, not creations, are the actual violations.}
+Stacked Borrows already adresses the two issues we have raised above with
+why the Borrow Checker is insufficient: it executes at runtime and it handles
+\texttt{unsafe} code as well. There are however a few aspects in which
+Stacked Borrows behaves in ways that are too strict or too unpredictable.
 
 \paragraph*{Reads should not invalidate other Reads.}
+An optimization that should always be possible is to permute two adjacent and independent
+read accesses. Since a read access cannot alter the outcome of another, permuting
+two reads produces a program that is guaranteed to have the same outcome.
+
+Unfortunately that is not an optimization that Stacked Borrows always allows
+because under some circumstances permuting two adjacent reads can introduce new
+UB that was not in the original program, and of course introducing UB in a program
+that did not contain any is not a valid optimization.
+
+Thus of the two following functions, in which the only difference is a reordering
+of read-only accesses, only one is UB and replacing the other with it is not
+a valid program transformation.
+\begin{lstlisting}
+// UB according to Stacked Borrows.
+fn read_xy() {
+    let x = &mut 0u8;
+    let y = unsafe { &mut *(x as *mut u8) };
+    let _val = *x;
+    let _val = *y;
+}
+
+// Not UB according to Stacked Borrows.
+fn read_yx() {
+    let x = &mut 0u8;
+    let y = unsafe { &mut *(x as *mut u8) };
+    let _val = *y;
+    let _val = *x;
+}
+\end{lstlisting}
+
+\paragraph*{Accesses, not creations, are the actual violations.}
+As shown by the code below, Stacked Borrows considers creating a mutable reference
+to already be a violation of the requirement that there is no mutable access to
+the data under a shared reference, even if there is no write access involved.
+Since this is needlessly strict and also an instance of the previous concern on
+reads not invalidating reads, we do not wish for Tree Borrows to declare a simple
+creation without access of a mutable reference to be a write access.
+\begin{lstlisting}
+// UB according to Stacked Borrows.
+// Should not be UB according to Tree Borrows.
+fn unused_borrow() {
+    let x = &mut 0u64;
+    let y = unsafe { &*(x as *const u64) };
+    let _z = unsafe { &mut *(x as *mut u64) };
+    let _val = *y;
+}
+\end{lstlisting}
+
+\paragraph*{Proper implementation of 2-phase borrows.}
+% FIXME: introduction to 2-phase borrows before this point, here is only
+% how SB handles it. Or rather how it doesn't.
+As stated in \cite{rustc_dev_guide}, 2-phase borrows should act as shared references
+during their reserved phase. This is not how Stacked Borrows defines them: in
+Stacked Borrows, 2-phase borrows are raw pointers before their activation.
+
+In particular the following piece of code shows the kind of pattern that this
+improperly allows. The fact that explicit reborrows of the form \texttt{\&mut *x}
+are never 2-phase borrows adds to the confusion: this makes programs suddently
+become UB if we remove some \texttt{&mut*} or if we inline some functions.
+We wish for Tree Borrows's handling of 2-phase borrows to be more strict and
+more consistent.
+\begin{lstlisting}
+// Not UB according to Stacked Borrows.
+// Should be UB according to Tree Borrows.
+fn write_during_2phase() {
+    let x = &mut 0u8;
+    let xraw = x as *mut u8;
+    print(
+        x,
+        unsafe { *xraw += 1; },
+    );
+}
+
+// UB according to Stacked Borrows.
+// Should also be UB according to Tree Borrows.
+fn write_during_reborrow() {
+    let x = &mut 0u8;
+    let xraw = x as *mut u8;
+    print(
+        &mut *x,
+        unsafe { *xraw += 1; },
+    );
+}
+
+fn print(x: &mut u8, _: ()) {
+    println!("{x}");
+}
+\end{lstlisting}
 
 \paragraph*{On handling pointee types of unknown size.}
+Stacked Borrows needs to know at the moment of reborrow the range that a pointer
+covers. This in particular makes it unable to handle types of unknown size and
+accesses outside of the reborrowed range.
+As an example the following code is rejected by Stacked Borrows:
+\begin{lstlisting}
+// UB according to Stacked Borrows.
+// Should not be UB according to Tree Borrows.
+fn offset_outside_reborrowed_range() {
+    let mut data = [0u8, 1, 2];
+    let x1 = (&mut data[1]) as *mut u8;
+    unsafe { *(x1.add(1)) = 3 };
+}
+\end{lstlisting}
 
 \section{The Tree Borrows aliasing model}
 
-\subsection{A tree of pointers}
-
-\subsection{Permissions and updates}
+% FIXME: Insert here ../model
 
 \section{Tree Borrows implemented}
 
+\subsection{Testing the Rust Standard Library}
+
 \subsection{Performance concerns and optimizations}
 
-\subsection{Testing the Rust Standard Library}
+Tree Borrows is slower than Stacked Borrows.
+
+The semantics require that on every access, every tag of the allocation be
+updated. On allocations with many reborrows this can easily lead to a naive
+implementation of Tree Borrows being slower than Stacked Borrows by an arbitrarily
+large multiplicative factor.
+
+Fortunately Tree Borrows has access to easy optimizations that allow it to have
+an execution time in the same order of magnitude as that of Stacked Borrows on
+realistic code samples.
+
+% FIXME: insert benchmarks
+% FIXME: also time to run tests
+% FIXME: also time to run the stdlib
 
 \section{Future work}
 
@@ -310,6 +486,7 @@ to the model we want to develop.
 %%
 %% Bibliography
 %%
+% Rustc dev guide: https://rustc-dev-guide.rust-lang.org/borrow_check/two_phase_borrows.html
 
 \bibliography{literature}
 
