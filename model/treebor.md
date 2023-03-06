@@ -330,10 +330,10 @@ fn main() {
     // |-- xref: Reserved
     //     |-- xraw: Reserved
     //     |-- xshr: Frozen
-    assert_eq!(*xshr, 2); // This is a Foreign Write for xref and xraw
+    assert_eq!(*xshr, 2); // This is a Foreign Read for xref and xraw
     unsafe { *xraw = 4; } // This is a Child Write for xref and xraw
                           // meaning it must still be writeable at this point,
-                          // therefore the above Foreign Write must not have turned
+                          // therefore the above Foreign Read must not have turned
                           // them Frozen.
     assert_eq!(x, 4);
 }
