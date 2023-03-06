@@ -12,8 +12,9 @@
 \usepackage{enumitem}
 \usepackage{framed}
 \usepackage{graphicx}
+\usepackage{multirow}
 \usepackage{microtype}
-\usepackage{xcolor}
+\usepackage[dvipsnames]{xcolor}
 \usepackage[unicode]{hyperref}
 \usepackage{amsfonts}
 \usepackage{algorithm}
@@ -405,7 +406,7 @@ Stacked Borrows, 2-phase borrows are raw pointers before their activation.
 In particular the following piece of code shows the kind of pattern that this
 improperly allows. The fact that explicit reborrows of the form \texttt{\&mut *x}
 are never 2-phase borrows adds to the confusion: this makes programs suddently
-become UB if we remove some \texttt{&mut*} or if we inline some functions.
+become UB if we remove some \texttt{\&mut*} or if we inline some functions.
 We wish for Tree Borrows's handling of 2-phase borrows to be more strict and
 more consistent.
 \begin{lstlisting}
@@ -463,18 +464,85 @@ fn offset_outside_reborrowed_range() {
 
 Tree Borrows is slower than Stacked Borrows.
 
-The semantics require that on every access, every tag of the allocation be
-updated. On allocations with many reborrows this can easily lead to a naive
-implementation of Tree Borrows being slower than Stacked Borrows by an arbitrarily
-large multiplicative factor.
+The semantics require that on every access, every tag of the allocation have its
+permissions updated on the corresponding range. On allocations with many reborrows
+this can easily lead to a naive implementation of Tree Borrows being slower than
+Stacked Borrows by an arbitrarily large multiplicative factor.
 
 Fortunately Tree Borrows has access to easy optimizations that allow it to have
 an execution time in the same order of magnitude as that of Stacked Borrows on
-realistic code samples.
+realistic code samples. We observe that in practice the slowdown from Stacked Borrows
+to Tree Borrows is mostly less than x2 on benchmarks that are specifically designed
+to stress the borrow tracker, and about x1.3 on general tests that don't particularly attempt to
+push the borrow tracker to its limits.
 
-% FIXME: insert benchmarks
-% FIXME: also time to run tests
-% FIXME: also time to run the stdlib
+
+\begin{tabular}{|l|l|c|c|c|c|}
+    \hline
+    Project & Test & Runs & SB & TB & Factor \\
+    \hline
+    \multirow{2}{9em}{Miri}
+        & \texttt{slice-get-unchecked} & 5 & 0.56s & 4.15s & {\color{Red}x7.41} \\
+        & \texttt{mse} & 5 & 0.67s & 1.42s & {\color{Red}x2.12} \\
+        & \texttt{serde1} & 5 & 1.53s & 2.60s & {\color{YellowOrange}x1.70} \\
+        & \texttt{serde2} & 5 & 3.19s & 5.16s & {\color{YellowOrange}x1.62} \\
+        & \texttt{unicode} & 5 & 1.27s & 1.99s & {\color{YellowOrange}x1.57} \\
+        & \texttt{backtraces} & 5 & 4.01s & 5.81s & {\color{YellowOrange}x1.45} \\
+    \hline
+    \multirow{3}{9em}{Stdlib}
+        & \texttt{core} & 1 & 4m31s & 9m15s & {\color{Red}x2.05} \\
+        & \texttt{alloc} & 1 & 4m45s & 5m54s & {\color{LimeGreen}x1.24} \\
+        & \texttt{std/time} & 1 & 15.1s & 17.5s & {\color{LimeGreen}x1.16} \\
+    \hline
+    \multirow{1}{9em}{Regex}
+        & \texttt{lib} & 1 & 13.3s & 20.6s & {\color{YellowOrange}x1.54} \\
+    \multirow{1}{9em}{Hashbrown}
+        & \texttt{lib} & 1 & 31.5s & 38.3s & {\color{LimeGreen}x1.21} \\
+    \multirow{1}{9em}{Tokio}
+        & \texttt{lib} & 1 & 40.7s & 45.3s & {\color{LimeGreen}x1.11} \\
+    \multirow{1}{9em}{Rand}
+        & \texttt{lib} & 1 & 1m24s & 1m31s & {\color{LimeGreen}x1.08} \\
+    \hline
+\end{tabular}
+
+\begin{itemize}
+    \item Miri
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/miri}{\texttt{github:rust-lang/miri}}
+            \item[Command] \texttt{MIRIFLAGS="" ./miri bench}
+        \end{description}
+    \item Miri-test-stdlib
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/miri-test-stdlib}{\texttt{github:rust-lang/miri-test-stdlib}}
+            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh core --lib --tests}
+            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh alloc --lib --tests}
+            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation"}\\
+                \texttt{./run-test.sh std --lib --tests -- time::}
+        \end{description}
+    \item Tokio
+        \begin{description}
+            \item[Source] \href{https://github.com/tokio-rs/tokio}{\texttt{github:tokio-rs/tokio}}
+            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tag-raw-pointers"} \\
+                \texttt{cargo +nightly miri test --features full --lib}
+        \end{description}
+    \item Rand
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-random/rand}{\texttt{github:rust-random/rand}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
+        \end{description}
+    \item Hashbrown
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/hashbrown}{\texttt{github:rust-lang/hashbrown}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
+        \end{description}
+    \item Regex
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/regex}{\texttt{github:rust-lang/regex}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib -- --skip encode\_decode}
+        \end{description}
+
+
+\end{itemize}
 
 \section{Future work}
 
