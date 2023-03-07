@@ -53,6 +53,10 @@
 \newtheorem*{remark}{Remark}
 \newtheorem{openquestion}[theorem]{Open question}
 
+\newcommand{\tcode}[1]{\texttt{#1}}
+\newcommand{\tperm}[1]{\texttt{#1}}
+\newcommand{\tsub}[1]{\textsubscript{#1}}
+
 % Well-parenthesized commands
 \newcommand{\set}[1]{\ensuremath{\left\{#1\right\}}}
 
@@ -136,21 +140,21 @@ fn example1(x: &mut u64, y: &mut u64) -> u64 {
 }
 \end{lstlisting}
 
-Because mutable references in Rust are required to be unique, \texttt{x} and
-\texttt{y} must point to disjoint regions of memory. In particular the
-instruction \texttt{*y = xval + 1} constitutes a write to \texttt{y}, but it
-cannot affect the memory covered by \texttt{x}: the value \texttt{*x} is unaffected
-and thus the second read of \texttt{*x} is redundant. This function can be
+Because mutable references in Rust are required to be unique, \tcode{x} and
+\tcode{y} must point to disjoint regions of memory. In particular the
+instruction \tcode{*y = xval + 1} constitutes a write to \tcode{y}, but it
+cannot affect the memory covered by \tcode{x}: the value \tcode{*x} is unaffected
+and thus the second read of \tcode{*x} is redundant. This function can be
 optimized to perform one fewer operation by deleting the second line on which
-\texttt{*x} is read, without modifying behavior.
+\tcode{*x} is read, without modifying behavior.
 
 Unfortunately there is a huge gap in the proof above: we have not specified
 by whom, in what contexts or in which manner mutable references are ``required''
 to be unique. This is the purpose of Tree Borrows.
 
-Indeed there exists in Rust the \texttt{unsafe} keywords which
+Indeed there exists in Rust the \tcode{unsafe} keywords which
 allows the programmer to bypass certain compiler checks by extending their
-available instruction set: among other things the \texttt{unsafe} keyword allows
+available instruction set: among other things the \tcode{unsafe} keyword allows
 dereferencing raw pointers in the following manner:
 \begin{lstlisting}
 fn context1() {
@@ -162,19 +166,19 @@ fn context1() {
     assert!(result == 43);
 }
 \end{lstlisting}
-Here we use \texttt{unsafe} instructions to obtain two mutable references
-to the same location, and we pass both of them to \texttt{example1}.
-While in this context the original version of \texttt{example1} will return
-\texttt{43}, the optimized version will instead return \texttt{42}.
+Here we use \tcode{unsafe} instructions to obtain two mutable references
+to the same location, and we pass both of them to \tcode{example1}.
+While in this context the original version of \tcode{example1} will return
+\tcode{43}, the optimized version will instead return \tcode{42}.
 
 The optimization shown here is thus not unconditionally valid: violating the
 unicity requirement of mutable references has enabled us to create a program
 in which the optimization does not preserve behavior.
 
-However we want this optimization to be valid, on the grounds of \texttt{context1}
+However we want this optimization to be valid, on the grounds of \tcode{context1}
 being a ``bad'' program that violates some assumptions that we want to be able
 to make. This issue is solved by adjusting the operational semantics of Rust
-in a way that declares \texttt{context1} ``Undefined Behavior'' (UB):
+in a way that declares \tcode{context1} ``Undefined Behavior'' (UB):
 a program exhibits UB when it performs some forbidden instruction.
 Compilers can assume that programs do not exhibit UB, and optimizations are
 not required to preserve the observable behavior of such programs.
@@ -195,7 +199,7 @@ if the rules are vague then compiler writers are unsure what assumptions they ca
 and language users may accidentally write a program that exhibits UB.
 
 An explicit design decision of Rust is that programs that that do not use the
-\texttt{unsafe} keyword cannot be declared UB. For \texttt{unsafe} to be useful,
+\tcode{unsafe} keyword cannot be declared UB. For \tcode{unsafe} to be useful,
 it should also hold that it is not too difficult to write unsafe Rust that is not
 UB. Tree Borrows should thus:
 \begin{itemize}
@@ -229,14 +233,14 @@ mostly the different kinds of pointers available -- and provide an intuition
 for the aliasing constraints they should satisfy.
 
 We call ``safe Rust'' the subset of the complete Rust language (more explicitly called ``unsafe Rust'')
-that does not use the \texttt{unsafe} keyword (and thus does not use any \texttt{unsafe}
+that does not use the \tcode{unsafe} keyword (and thus does not use any \texttt{unsafe}
 instructions).
 
 \subsection{References and raw pointers}
 
 Rust offers a kind of pointer with more guarantees than its counterpart in most
-languages: references. Written \texttt{\&} (\texttt{let x:~\&T = \&t;}) or
-\texttt{\&mut} (\texttt{let x:~\&mut T = \&mut t;}) for immutable and mutable
+languages: references. Written \tcode{\&} (\texttt{let x:~\&T = \&t;}) or
+\tcode{\&mut} (\texttt{let x:~\&mut T = \&mut t;}) for immutable and mutable
 references respectively.
 
 These references should satisfy ``aliasing XOR mutability'': for a given memory
@@ -247,13 +251,13 @@ shared read permissions, not both.
 
 As a means of interfacing with C code and expressing complex pointer manipulations,
 Rust also offers another type of pointers, called raw pointers, written
-\texttt{*const T} for immutable raw pointers and \texttt{*mut T} for mutable
+\tcode{*const T} for immutable raw pointers and \tcode{*mut T} for mutable
 raw pointers. There pointers can bypass some requirements of references (there
 can exist multiple \texttt{*mut T} to the same location), but their use is more
 dangerous and dereferencing raw pointers can be done only in blocks marked by
-the keyword \texttt{unsafe \{...\}} thus their use is usually restricted to
+the keyword \tcode{unsafe \{...\}} thus their use is usually restricted to
 situations where they are absolutely necessary.
-Several \texttt{*mut T} can exist simultaneously.
+Several \tcode{*mut T} can exist simultaneously.
 
 
 The following snippet shows some conversions between these kinds of pointers:
@@ -282,7 +286,7 @@ be too much UB.
 
 However in places where Tree Borrows does not follow the same rules as the
 Borrow Checker the following should always hold: code that does not use
-\texttt{unsafe} \textit{and} is accepted by the Borrow Checker should never
+\tcode{unsafe} \textit{and} is accepted by the Borrow Checker should never
 be UB.
 
 \paragraph*{Bypassing the Borrow Checker with \texttt{unsafe} code.}
@@ -313,14 +317,14 @@ fn alternate_writes_raw() {
 \end{lstlisting}
 
 Since the explicit purpose of Tree Borrows is to also verify and optimize
-\texttt{unsafe} code, it should be more robust than this. This is both so that
-\texttt{unsafe} code actually gets checked and so that the use of \texttt{unsafe}
+\tcode{unsafe} code, it should be more robust than this. This is both so that
+\tcode{unsafe} code actually gets checked and so that the use of \tcode{unsafe}
 does not completely block all optimizations.
 
 \paragraph*{Borrow conflicts undecidable at compile-time.}
-As we have shown in \texttt{example1} above, whether a function call triggers
+As we have shown in \tcode{example1} above, whether a function call triggers
 UB is in general dependent on what arguments it receives at runtime. Since the
-usual reason that \texttt{unsafe} code is used in the first place is usually
+usual reason that \tcode{unsafe} code is used in the first place is usually
 that its safety relies on properties undecideable at compile-time, we define
 UB at runtime. If some piece of code is unreachable then it cannot produce UB.
 
@@ -344,10 +348,10 @@ fn unreachable_borrow() {
 
 Stacked Borrows already adresses the two issues we have raised above with
 why the Borrow Checker is insufficient: it executes at runtime and it handles
-\texttt{unsafe} code as well. There are however a few aspects in which
+\tcode{unsafe} code as well. There are however a few aspects in which
 Stacked Borrows behaves in ways that are too strict or too unpredictable.
 
-\paragraph*{Reads should not invalidate other Reads.}
+\paragraph*{Reads should not invalidate other reads.}
 An optimization that should always be possible is to permute two adjacent and independent
 read accesses. Since a read access cannot alter the outcome of another, permuting
 two reads produces a program that is guaranteed to have the same outcome.
@@ -404,9 +408,9 @@ during their reserved phase. This is not how Stacked Borrows defines them: in
 Stacked Borrows, 2-phase borrows are raw pointers before their activation.
 
 In particular the following piece of code shows the kind of pattern that this
-improperly allows. The fact that explicit reborrows of the form \texttt{\&mut *x}
+improperly allows. The fact that explicit reborrows of the form \tcode{\&mut *x}
 are never 2-phase borrows adds to the confusion: this makes programs suddently
-become UB if we remove some \texttt{\&mut*} or if we inline some functions.
+become UB if we remove some \tcode{\&mut*} or if we inline some functions.
 We wish for Tree Borrows's handling of 2-phase borrows to be more strict and
 more consistent.
 \begin{lstlisting}
@@ -454,7 +458,106 @@ fn offset_outside_reborrowed_range() {
 
 \section{The Tree Borrows aliasing model}
 
-% FIXME: Insert here ../model
+\subsection{Tree Structure}
+
+The core principle of Tree Borrows is that in order to detect aliasing between
+pointers we associate a \textit{permission} to each pointer. Conflicting aliases
+manifest in the form of attempted accesses with insufficient permissions: if
+a tag does not allow write accesses it means that writing through this tag
+would violate the immutability assumptions of other pointers.
+
+These permissions are dynamic during the execution of the program, and are
+updated based on the various pointer creations and accesses that occur. As
+long as all accesses are done through pointers with sufficient permissions there
+is no UB.
+
+Pointers are identified by their unique \textit{tag}. Over the lifetime of a pointer,
+various read or write accesses may cause its permissions to be updated.
+Tree Borrows has the property that the update of permissions is a process
+that only requires local information concerning which pointers were derived from
+which other pointers, and we store this information in a \textit{borrow tree}.
+
+\subsubsection{Creation of a new Node}
+
+For each memory location, we maintain a borrow tree which contains
+the following data:
+\begin{lstlisting}
+// Per-tag data consists of
+// - permissions
+// - local tree structure
+struct Node {
+    // The pointer (identified by its tag) that this node represents
+    tag: Tag,
+    // The parent pointer; the root has no parent
+    parent: Option<Tag>,
+    // The child pointers
+    children: Vec<Tag>,
+    // The current permissions associated with this tag
+    permissions: ReadWritePerms,
+    /* Some lazy initialization and debug information omitted */
+}
+
+// Per-location data consists of
+// - aggregated per-tag data for all relevant tags
+struct Tree {
+    root_tag: Tag,
+    nodes: Map<Tag, Node>,
+}
+\end{lstlisting}
+
+All pointers tracked by Tree Borrows have an associated tag. Several pointers
+can share the same tag, making them indistinguishable from each other.
+
+When a new pointer \tcode{y} is derived from an existing pointer \tcode{x}, depending
+on the kind of operation that caused the creation of \tcode{y} and the underlying
+pointee type,
+
+\begin{itemize}
+    \item either \tcode{y} will receive the same tag as \tcode{x} meaning that from this
+        point onwardS \tcode{x} and \tcode{y} are indistinguishable from the point of view of Tree
+        Borrows,
+    \item or a new fresh tag will be created, associated with \tcode{y}, and recorded in the
+        tree stucture as a child of the tag of \tcode{x}. This new tag will have its own
+        associated permissions.
+\end{itemize}
+
+Moreover for the purposes of what we will discuss in \ref{TODO}, creation of
+a child tag from a parent tag \tcode{x} counts as a read access through \tcode{x}.
+Among other things, this action ensures that \tcode{x} actually has permission to
+access the locations it is being reborrowed on.
+
+No read access will be performed and no new tag will be created in the following
+cases:
+\begin{itemize}
+    \item mutable references \tcode{\&mut} whose underlying type is \tcode{!Unpin};
+    \item shared references \tcode{\&} whose underlying type is \tcode{!Freeze} (has interior mutability);
+    \item raw pointers \tcode{*mut} and \tcode{*const}.
+\end{itemize}
+
+Those kinds of pointers share the property that they do not satisfy the rule
+of "aliasing XOR mutability", and must thus be handled by Tree Borrows differently
+from other more restricted pointers.
+
+As an immediate optimization, one can notice that the tree structure will
+be identical for all locations of an \textit{allocation}, meaning that although
+the permissions must be stored and updated on a per-location basis, the
+borrow tree itself can be shared at the allocation level.
+
+\subsubsection{Navigating the Tree}
+
+For the purposes of the permission update mechanism described in \ref{TODO},
+we introduce here some terminology.
+
+Consider a tag \tcode{t\tsub{0}} through which an access was performed, and a tag
+\tcode{t\tsub{1}} from the same allocation whose permissions will be updated. From the point
+of view of \tcode{t\tsub{1}} we call an access through \tcode{t\tsub{0}} a \textit{child access}
+if \tcode{t\tsub{0}} is a transitive child of \tcode{t\tsub{1}} (including \tcode{t\tsub{1}} itself).
+In all other cases --- which include strict transitive parents of \tcode{t\tsub{1}} as well as
+all pointers who do not share a branch with \tcode{t\tsub{1}} --- we call an access through
+\tcode{t\tsub{0}} a \textit{foreign access}.
+
+\includegraphics[width=\textwidth]{../figs/accesses-kinds.pdf}
+
 
 \section{Tree Borrows implemented}
 
