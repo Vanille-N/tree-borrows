@@ -557,11 +557,695 @@ all pointers who do not share a branch with \tcode{t\tsub{1}} --- we call an acc
 \tcode{t\tsub{0}} a \textit{foreign access}.
 
 \includegraphics[width=\textwidth]{../figs/accesses-kinds.pdf}
+% FIXME: caption
+
+\subsection{Pointer permissions}
+
+\subsubsection{Available permission combinations}
+
+Pointers can have the following permissions:
+\begin{itemize}
+    \item read permisions: \tperm{Read} or \tperm{!Read};
+    \item write permissions: \tperm{Write} or \tperm{Future Write} or \tperm{!Write}.
+\end{itemize}
+
+We choose to introduce \tperm{Future Write} permissions as a way for Tree Borrows to
+natively handle 2-phase borrows, as is explained in \ref{TODO}.
+This does not directly allow write accesses through this pointer, but it reserves
+a right to obtain such \tperm{Write} permissions later in the execution.
+
+Tree Borrows uses the following combinations of permissions:
+\begin{lstlisting}
+enum ReadWritePerms {
+    Reserved = Read + Future Write,
+    Active = Read + Write,
+    Frozen = Read + !Write,
+    Disabled = !Read + !Write,
+}
+\end{lstlisting}
+
+They are to be interpreted in the following way:
+\begin{itemize}
+    \item a \tperm{Disabled} tag corresponds to a pointer whose lifetime has ended;
+    \item a \tperm{Frozen} tag gives read-only permissions to a pointer, so it is suitable
+        for shared references without interior mutability;
+    \item an \tperm{Active} tag corresponds to a mutable reference that is currently being used mutably;
+    \item a \tperm{Reserved} tag corresponds to a mutable reference that has not been used mutably yet.
+\end{itemize}
+
+\subsubsection{The purpose of \tperm{Future Write}}
+
+The following code features a so-called ``2-phased borrow'':
+\begin{lstlisting}
+impl X {
+    fn method(&mut self, ...) { ... }
+}
+
+x: &mut X
+x.method(arg1, arg2, ...);
+\end{lstlisting}
+where the method call desugars to approximately
+\begin{lstlisting}
+let x_bor: &mut *x;
+                    -----
+let arg1 = ...;         |--- special zone within which x is still accessible,
+let arg2 = ...;         |    but only immutably
+                    -----
+X::method(x_bor, arg1, arg2, ...);
+\end{lstlisting}
+% FIXME: box around the zone
+
+As a concrete example, consider
+\begin{lstlisting}
+v: &mut Vec<usize>
+v.push(v.len());
+\end{lstlisting}
+which the Borrow Checker accepts despite rejecting the following
+\begin{lstlisting}
+v: &mut Vec<usize>
+let w = &mut *v;
+let l = v.len();
+Vec::push(w, l);
+\end{lstlisting}
+
+Therefore the existence of 2-phase borrows suggests the possibility of a mutable
+borrow being ``delayed'': as long as it has not yet been accessed mutably, it still
+tolerates shared read-only access. In other words, it does not have a \tperm{Write}
+permission yet, but can obtain one in the future. This is exactly how our
+\tperm{Future Write} permission is set to behave.
+
+Rather than limiting this behavior to 2-phase borrows only, we choose in Tree
+Borrows to make all mutable borrows behave in a uniform way: all mutable references
+will wait until their first write access to claim their \tperm{Write} permission,
+and will allow shared read-only access in the meantime. If not for this, a lot
+of code currently being written would not be accepted, such as some code that
+follows the following pattern
+\begin{lstlisting}
+                             // More generally:
+let ptr = vec.as_mut_ptr();  // - some mutable reborrow
+if vec.len() > 0 {           // - use base pointer immutably
+   do_stuff(ptr)             // - then use the reborrow
+}
+\end{lstlisting}
+
+A concrete example currently in use in the standard library test suite:
+\begin{lstlisting}
+let mut x = 2;
+let xref = &mut x;
+let xraw = &mut *xref as *mut _; // create a mutable reborrow
+let xshr = &*xref;
+assert_eq!(*xshr, 2); // read-only usage of the base pointer
+unsafe {
+    *xraw = 4; // usage of the mutable reborrow
+}
+assert_eq!(x, 4);
+\end{lstlisting}
+
+Extending the behavior of 2-phase borrows to all mutable borrows also serves
+towards our goal of allowing all reorderings of read-only operations: it lets
+us exchange reads through mutable (but not used mutably) references with each
+other and with reborrows of other mutable references.
+
+\subsubsection{Initialization}
+
+The initial permissions depend of the type of borrow.
+Recall from \ref{TODO} that raw pointers do not receive new permissions and instead
+use the same tag and permissions as their parent pointer. This leaves mutable and
+shared references for which we must determine an initial permission.
+
+All references obtain a \tperm{Read} permission initially. This is required
+because we perform a fake read access upon reborrowing a reference, and it asserts
+that all references are dereferenceable (they are tagged \texttt{dereferenceable}
+in LLVM).
+
+In addition, mutable references obtain a \tperm{Future Write} permission upon initialization
+making them \tperm{Reserved}, while shared references receive \tperm{!Write} which makes them \tperm{Frozen}.
+
+\subsection{Updates}
+
+We now describe how permissions are updated after an access is performed.
+The update process is roughly as follows.
+
+In reaction to an access at \tcode{t\tsub{0}}, traverse the tree. For each \tcode{t\tsub{1}} node of the
+tree, if \tcode{t\tsub{0}} is a child of \tcode{t\tsub{1}} then the access is a child access at \tcode{t\tsub{1}}; otherwise
+it is a foreign access at \tcode{t\tsub{1}}. Based on the type of access (both child/foreign
+and read/write) and some local information, determine the new permissions for the
+pointer.
+
+\includegraphics[width=\textwidth]{../figs/child-or-foreign.pdf}
+% FIXME: caption
+
+\subsubsection{Intuition on effects of accesses}
+
+\paragraph*{Child accesses}
+
+If \tperm{Active} is to represent mutable references, then it must allow child writes
+as well as child reads. Our interpretation of \tperm{Reserved} as a mutable reference
+that is not yet used mutably implies that it much be unaffected by child reads,
+but turn into \tperm{Active} on the first child write.
+
+\tperm{Frozen} representing a non-interior-mutable shared reference, it must allow
+child reads. As child writes are forbidden on such references, we declare any
+child write on a \tperm{Frozen} to be UB.
+
+Any child access is obviously UB on a \tperm{Disabled}.
+
+\paragraph*{Foreign accesses on Frozen}
+
+Since shared references allow shared read access, \tperm{Frozen} must be unaffected
+by Foreign reads. As shared references on types without interior mutability
+assume that no other reference accesses the same data mutably, a \tperm{Frozen} must
+become \tperm{Disabled} upon a Foreign write.
+
+\paragraph*{Foreign accesses on Active}
+
+Several mutable references cannot coexist with each other or with shared
+references, so an \tperm{Active} must not remain \tperm{Active} upon a foreign access.
+
+If another mutable reference is accessed, which corresponds to a foreign write,
+then this \tperm{Active} must lose all permissions and become \tperm{Disabled}.
+
+According to the Borrow Checker, an \tperm{Active} loses all permissions on a Foreign read:
+\begin{lstlisting}
+// Example 3.A.1
+fn main() {
+    let base = &mut 42u64;
+    let rmut = &mut *base;
+    // base: Reserved
+    // |-- rmut: Reserved
+    *rmut += 1; // Child write for both base and rmut
+    // base: Active
+    // |--  rmut: Active
+    let _val = *base; // Child read for base; foreign read for rmut
+    // base: Active
+    // |-- rmut: ???
+    let _val = *rmut; // Compilation error
+    // According to the Borrow Checker, rmut is no longer readable
+}
+\end{lstlisting}
+
+However we want Tree Borrows to be suited for proving the validity of reordering
+any two adjacent read accesses, which means in particular that reordering two
+reads should not introduce new UB.
+
+The following piece of code is accepted:
+\begin{lstlisting}
+// Example 3.A.2
+fn main() {
+    let base = &mut 42u64;
+    let rmut = &mut *base;
+    // base: Reserved
+    // |-- rmut: Reserved
+    *rmut += 1; // Child write for both base and rmut
+    // base: Active
+    // |--  rmut: Active
+    let _val = *rmut; // Child read for both base and rmut
+    // base: Active
+    // |-- rmut: Active
+    let _val = *base; // Child read for base; Foreign read for rmut
+    // base: Active
+    // |-- rmut: ???
+}
+\end{lstlisting}
+but swapping the two last reads from \textit{Example 3.A.2} would produce \textit{Example 3.A.1} above,
+which would be UB if \tperm{Active} were to become \tperm{Disabled} on a foreign read.
+We thus choose to make \tperm{Active} become \tperm{Frozen} instead, which means that in
+both examples above \tperm{???} should be \tperm{Frozen} and UB occurs in neither.
+
+\paragraph*{Foreign accesses on Reserved}
+
+\tperm{Reserved} is a more special case, and its behavior is guided by the following examples:
+\begin{lstlisting}
+// Example 3.R.1: Foreign read (standard 2-phase borrow example)
+// This must not be UB
+fn main() {
+    let mut x = vec![];
+    // x: Reserved
+    x.push( // 2-phase borrow starts here for x' implicitly reborrowed from x
+        // x: Reserved
+        // |-- x': Active
+        x.len() // Foreign read for x'
+        // After this, x' must still be writeable inside Vec::push
+        // thus a Foreign read must not affect Reserved tags.
+    );
+}
+```
+
+\begin{lstlisting}
+// Example 3.R.1': Foreign read outside 2-phase borrow
+// This is a very common pattern in the standard library, it must NOT be UB.
+// This also justifies why we need to use Reserved for all mutable references,
+// and not exclusively for 2-phase borrows.
+fn main() {
+    let mut x = 2;
+    let xref = &mut x;
+    let xraw = &mut *xref as *mut _;
+    let xshr = &*xref;
+    // x: Reserved
+    // |-- xref: Reserved
+    //     |-- xraw: Reserved
+    //     |-- xshr: Frozen
+    assert_eq!(*xshr, 2); // This is a Foreign read for xref and xraw
+    unsafe { *xraw = 4; } // This is a child write for xref and xraw
+                          // meaning it must still be writeable at this point,
+                          // therefore the above Foreign read must not have turned
+                          // them Frozen.
+    assert_eq!(x, 4);
+}
+\end{lstlisting}
+
+\begin{lstlisting}
+// Example 3.R.2: Foreign write
+// This should be UB
+fn main() {
+    let mut x = 2;
+    let mut xref = &mut x;
+    // x: Reserved
+    // |-- xref: Reserved
+    *x = 3; // Child write for x; Foreign write for xref
+    // x: Active
+    // |-- xref: ???
+    *xref = 4; // If this is not UB then we are able to alternate writes
+               // between two references that each claim exclusive access.
+               // This is bad, so xref must no longer have write permissions.
+               // The data has been mutated, so xref also can't claim shared
+               // read-only access. Therefore Foreign writes must make Reserved
+               // turn into Disabled, which causes UB in this example as desired.
+    *x = 3;
+}
+\end{lstlisting}
+
+\begin{lstlisting}
+// Example 3.R.2': Foreign write with interior mutability
+// This must not be UB
+fn main() {
+    use std::cell::Cell;
+    trait Thing: Sized {
+        fn do_the_thing(&mut self, _s: ());
+    }
+
+    let mut x = Cell::new(1);
+    // x: Reserved
+    x.do_the_thing({
+        // A 2-phase starts here for x' implicitly reborrowed from x
+        // x: Reserved
+        // |-- x': Reserved
+        x.set(3) // This is a Foreign write for x'
+        // x: Active
+        // |-- x': ???
+    })
+    impl<T> Thing for Cell<T> {
+        fn do_the_thing(&mut self, _s: ()) {
+            // Function call starts, x' is implicitly reborrowed into x''
+            // x: Active
+            // |-- x': ???
+            //     |-- x'': Reserved
+            self.set(5): // x' must be readable and writeable
+                         // This is a child write for x', which means
+                         // that x' is now Active and was not previously Disabled
+                         // or Frozen. Therefore x' was previously still Reserved,
+                         // even though it was subjected to a Foreign write.
+        }
+    }
+}
+\end{lstlisting}
+
+\paragraph*{Ordering of states}
+
+From the above we can observe that all transitions follow the order
+\tperm{Reserved < Active < Frozen < Disabled}, which corresponds to the permissions
+during a "normal" lifetime of a mutable reference: it is \tperm{Reserved} upon creation
+to accomodate for 2-phase borrows, then eventually becomes \tperm{Active} on the first
+child write. The next Foreign read marks the end of its period of exclusive access
+and it can now only be accessed immutably by becoming \tperm{Frozen}. Eventually its
+lifetime ends altogether as a different branch claims exclusive access, it
+becomes \tperm{Disabled} and will remain so forever.
+
+\subsubsection{Automata of Permissions}
+
+The full automata of how permissions react to accesses can be seen in \ref{TODO}.
+For now this is nothing more than the aggregation of everything established in \ref{TODO}.
+
+\includegraphics[width=\textwidth]{../figs/state-machine_noprotect.pdf}
+% FIXME: caption
+
+A possible interpretation of these transitions:
+\begin{itemize}
+    \item in reaction to a child access, the state will advance forward according to \tperm{<} until
+        it has obtained the required read or write permissions for the access to be performed
+        \begin{itemize}
+            \item \tperm{Reserved}, \tperm{Active}, and \tperm{Frozen} already have their \tperm{Read} permissions,
+                so a child read does not affect them;
+            \item \tperm{Active} also has \tperm{Write} permissions, so it is unaffected child Write;
+            \item \tperm{Reserved} does not have \tperm{Write} (only \tperm{Future write}), but it can advance to \tperm{Active} to
+                obtain the missing permission;
+            \item \tperm{Frozen} for a \tperm{Write} and \tperm{Disabled} for both \tperm{Read} and \tperm{Write} have no way of
+                obtaining the required permissions, since all reachable states are also missing these
+                permissions, this produces UB.
+        \end{itemize}
+    \item in reaction to a Foreign access, the state will advance forward according to \tcode{<} until
+        it has lost the incompatible permissions
+        \begin{itemize}
+            \item \tperm{Disabled} having no permissions to lose, it has both many looping transitions and many incoming transitions;
+            \item \tperm{Frozen} is the destination for an \tperm{Active} that needs to lose its \tperm{Write} permission;
+            \item \tperm{Frozen}'s \tperm{!Write} and \tperm{Reserved}'s \tperm{Future Write} are compatible with a Foreign read, hence the loops;
+            \item as a unique exception to everything being incompatible with a Foreign write, a \tperm{Reserved} can stay
+                \tperm{Reserved} if it has interior mutability, as explained previously by \textit{Example 3.R.2'}.
+        \end{itemize}
+\end{itemize}
+
+In addition, notice that every state that has an incoming transition for any kind of
+access also has a loop to itself for the same kind of access. For example a Foreign read
+access on \tperm{Active} leads to \tperm{Frozen}, which is stable under Foreign reads. Similarly
+a child write on Reserved leads to \tperm{Active} which is stable under child writes.
+This observation is an easy consequence of the "advance until permissions are compatible"
+interpretation of the transitions: once a state has been reached with compatible
+permissions, applying the same access again will be a no-op because the state
+is obviously already compatible. This idempotency of all accesses opens the door
+for optimizations: if the consequences of a certain kind of access have already
+been applied to some subtree of the borrow tree, said subtree can be skipped entirely
+from the tree traversal if the next access is also of the same kind.
+
+
+\subsubsection{Protectors}
+
+The compiler optimizations that Tree Borrows should justify include LLVM optimizations,
+thus Tree Borrows must not allow violations of assumptions made by LLVM. Among these
+assumptions is \tcode{noalias} which specifies to what extent a pointer passed as an
+argument to a function aliases with other pointers. In Rust, mutable and shared
+references are both marked \tcode{noalias}.
+
+% FIXME: quote
+\begin{indent}
+    \tcode{noalias}
+
+    \begin{indent}
+        This indicates that memory locations accessed via pointer values based on the argument
+        are not also accessed, during the execution of the function, via pointer values not based on
+        the argument. This guarantee only holds for memory locations that are modified,
+        by any means, during the execution of the function.
+    \end{indent}
+
+    --- from the \href{https://llvm.org/docs/LangRef.html}{LLVM Language Reference Manual}
+\end{indent}
+
+This can be reworded in language closer to Tree Borrows:
+
+\begin{indent}
+An access via pointer values based on the argument is a child access.
+An access via pointer values *not* based on the argument is a Foreign access.
+If a tag is marked noalias then during the execution of the function there must
+not be both child and Foreign accesses for this tag if at least one of them is a write access.
+\end{indent}
+
+This means that the following pieces of code must be Undefined Behavior,
+but with the current model not all of them are:
+\begin{lstlisting}
+// Example 3.N.1
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *const u64;
+    let x = &mut *data;
+    foreign_read_before_write(x, y);
+    fn foreign_read_before_write(x: &mut u64, y: *const u64) {
+        // x: Reserved [noalias]
+        let _ = unsafe { *y }; // Foreign read for x
+        // x: Reserved [noalias]
+        *x += 1; // Child write for x
+        // /!\ Combined with the previous Foreign read this is a noalias violation
+        // x: Active [noalias]
+        // -- UB must occur before this point --
+        // (With the current model no UB occurs)
+    }
+}
+\end{lstlisting}
+\begin{lstlisting}
+// Example 3.N.2
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *const u64;
+    let x = &mut *data;
+    write_before_foreign_read(x, y);
+    fn write_before_foreign_read(x: &mut u64, y: *const u64) {
+        // x: Reserved [noalias]
+        *x += 1; // Child write for x
+        // x: Active [noalias]
+        let _ = unsafe { *y }; // Foreign read for x
+        // /!\ Combined with the previous child write this is a noalias violation
+        // x: Frozen [noalias]
+        // -- UB must occur before this point --
+        // (With the current model no UB occurs)
+    }
+}
+\end{lstlisting}
+\begin{lstlisting}
+// Example 3.N.3
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *mut u64;
+    let x = &*data;
+    foreign_write_before_read(x, y);
+    fn foreign_write_before_read(x: &u64, y: *mut u64) {
+        // x: Frozen [noalias]
+        unsafe { *y += 1; } // Foreign write for x
+        // x: Disabled [noalias]
+        let _ = *x; // Child read for x which has !Write
+        // /!\ Combined with the previous Foreign write this is a noalias violation
+        // This is already (correctly) UB in the current model
+        // -- UB must occur before this point --
+    }
+}
+\end{lstlisting}
+\begin{lstlisting}
+// Example 3.N.4
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *mut u64;
+    let x = &*data;
+    read_before_foreign_write(x, y);
+    fn read_before_foreign_write(x: &u64, y: *mut u64) {
+        // x: Frozen [noalias]
+        let _ = *x; // Child read for x
+        // x: Frozen [noalias]
+        unsafe { *y += 1; } // Foreign write for x
+        // /!\ Combined with the previous child read this is a noalias violation
+        // x: Disabled [noalias]
+        // -- UB must occur before this point --
+        // (With the current model no UB occurs)
+    }
+}
+\end{lstlisting}
+
+Only in \textit{Example 3.N.3} is there indeed UB. Here is what the other examples teach
+us:
+
+\begin{itemize}
+    \item (\textit{Example 3.N.4}) a \tperm{Frozen} becoming \tperm{Disabled} indicates the presence of a
+        Foreign write (only possible cause of the transition). If the location was also accessed
+        through any child access, then these two accesses violate \tcode{noalias}, thus a transition
+        \tperm{Frozen -> Disabled} should be UB on any accessed location;
+    \item the same remark applies to a \tperm{Reserved} or \tperm{Active} becoming \tperm{Disabled};
+    \item (\textit{Example 3.N.2}) an \tperm{Active} becoming \tperm{Frozen} indicates the presence of a child write
+        (requirement for the existence of an \texttt{Active}) and a Foreign write (only possible cause
+        of the transition). These two accesses violate \tcode{noalias}, thus a transition \tperm{Active -> Frozen}
+        should be UB;
+    \item (\textit{Example 3.N.1}) after a Foreign read has occured, \tperm{Reserved} must no longer allow
+        child writes. We model this by making it \tperm{Frozen}, which means that the next attempted child write
+        would be UB;
+    \item for the same reason \tperm{Reserved} must not stay \tperm{Reserved} after a Foreign write even
+        if it has interior mutability. We declare that under Foreign write, \tperm{Reserved} becomes
+        \tperm{Disabled} which means that the next attempted child read or write would be UB.
+\end{itemize}
+
+In terms of read and write permissions, this means that compared to the previous
+model without protectors, additional UB occurs on any transition that causes
+\tperm{Read -> !Read} or \tperm{Write -> !Write}.
+
+Once the function has returned, the pointer is no longer subjected to \tcode{noalias}
+and it resumes reacting ``normally'' to accesses.
+
+To handle this new addition to the model we introduce \textit{Protectors}. Upon function
+entry, we add a Protector to every reference passed as argument (Implementation:
+simply maintain a \tcode{HashSet} containing call ids of functions that have not yet
+returned and their reference arguments, and query this set on each transition
+to know if this tag's permissions should follow the protected or unprotected
+version of the transitions). In order to not declare too much UB, we also add
+to each state a boolean field \tcode{accessed}, which is initially \tcode{false} and becomes
+\tcode{true} on the first child access.
+
+Being protected thus modifies the behavior of pointers in the way described in \ref{TODO}.
+
+\includegraphics[width=\textwidth]{../figs/state-machine.pdf}
+% FIXME: caption
+
+Note: we observed earlier that for every kind of access, the corresponding transitions
+are idempotent. The only transitions that have changed and could violate the observation would be
+
+\begin{itemize}
+    \item \tperm{Reserved -<foreign read>-> Reserved -<foreign read + protected>-> Frozen}, and
+    \item \tperm{Reserved -<foreign write>-> Reserved -<foreign write + protected>-> Disabled},
+\end{itemize}
+
+but for these to happen would require that a protector be added after the tag has already been
+subjected to an access, which is not something that occurs in our model.
+We can thus still rely on the effect of every access being idempotent.
+
+\subsubsection{Accesses outside of initial range}
+
+Tree Borrows is capable of handling pointers with unknown size as well as using
+a pointer to access data outside of the range it was reborrowed for.
+
+One such case is
+\begin{lstlisting}
+fn access_after_offset() { unsafe {
+    let data: [u64; 2] = [0, 1];
+    let fst = &mut data[0] as *mut u64;
+    let snd = fst.add(1);
+    ptr::swap(fst, snd);
+} }
+\end{lstlisting}
+Here the reborrow for \tcode{fst} only covers \tcode{data[0]}, but \tcode{snd} is then derived from
+\tcode{fst} and translated outside of its original range. As we still wish to check
+that even for these accesses no aliasing assumptions are violated, we track
+permissions even for locations outside of the range of the initial reborrow.
+
+These permissions outside the range can be initialized lazily rather than as soon
+as the reborrow occurs, because it is costly to immediately add permissions
+on the entire allocation when they will most likely never be actually used by
+a child access.
+
+We do not perform a read access on reborrow for locations outside of the range.
+
+\subsubsection{On whether to propagate loss of permissions}
+
+Consider the following pattern:
+\begin{lstlisting}
+let x = &mut 42u64;
+// x: Reserved
+let y = &mut *x; // Child read for x
+// x: Reserved
+// |-- y: Reserved
+*y += 1; // Child write for x and y
+// x: Active
+// |-- y: Active
+let z = &mut *y; // Child read for x and y
+// x: Active
+// |-- y: Active
+//     |-- z: Reserved
+let _ = *x; // Child read for x; Foreign read for y and z
+// The above setup produces the following tree:
+// x: Active
+// |-- y: Frozen
+//     |-- z: Reserved
+\end{lstlisting}
+No UB occurs here, the model thus allows having in the tree a \tperm{Frozen} parent with a \tperm{Reserved} child.
+This looks like we have derived a mutable reference from a shared reference, which would
+be worrying.
+
+We could resolve this concern by making \tcode{z} \tperm{Frozen} as well (i.e. requiring
+children of \tperm{Frozen} to be at least \tperm{Frozen} and children of \tperm{Disabled} to be
+at least \tperm{Disabled}), but in fact this would result in exactly the same
+UB as in the current model and thus non-\tperm{Frozen} children of \tperm{Frozen} are not
+a concern.
+
+Indeed from the point of view of child accesses, \tcode{z} has already in practice lost
+its \tperm{Write} permission, since any child write for \tcode{z} is also a child write for
+\tcode{y} and is thus UB.
+
+Even with the addition of Protectors, and child accesses no longer being the only
+kind of accesses that can cause UB, we can observe that the above pattern can
+only occur when the tag is unprotected.
+
+Thus not propagating loss of permissions from parents to children (not forcing \tperm{Frozen}
+parents to also have \tperm{Frozen} children) can make pointers have more permissions in
+appearance (what their \tcode{ReadWritePerms} suggest) than they actually do (what
+accesses would cause UB), but never in a way that would affect detection of UB.
+
+\subsection{Summary}
+
+\paragraph*{When creating a new pointer \tcode{z} from an existing \tcode{y}}
+\begin{itemize}
+    \item if \tcode{z} is a \tcode{Unpin} mutable reference
+        \begin{itemize}
+            \item perform the effects of a read access through \tcode{y}
+            \item add a new child of \tcode{y} in the tree
+            \item give it the permissions \tperm{Reserved = Read + Future Write}
+            \item keep track of whether it has interior mutability or not
+        \end{itemize}
+    \item if \tcode{z} is a non-interior-mutable shared reference
+        \begin{itemize}
+            \item perform the effects of a read access through \tcode{y}
+            \item add a new child of \tcode{y} in the tree
+            \item give it the permissions \tperm{Frozen = Read + !Write}
+        \end{itemize}
+    \item otherwise give \tcode{z} the same tag as \tcode{y}, they are indistinguishable from now on
+\end{itemize}
+
+\paragraph*{When reading through a pointer \tcode{y}}
+\begin{itemize}
+    \item for all ancestors \tcode{x} of \tcode{y} (including \tcode{y}), this is a child read
+        \begin{itemize}
+            \item assert that \tcode{x} has \tperm{Read} (i.e. is \tperm{Frozen} or \tperm{Reserved} or \tperm{Active})
+            \item otherwise (if \tcode{x} is \tperm{Disabled}) this is UB
+        \end{itemize}
+    \item for all non-ancestors \tcode{z} of \tcode{y} (excluding \tcode{y}), this is a foreign read
+        \begin{itemize}
+            \item turn \tperm{Write} into \tperm{!Write} (i.e. \tperm{Active -> Frozen}); this is UB if \tcode{z} is protected
+            \item if \tcode{z} is protected, turn \tperm{Future Write} into \tperm{!Write} (i.e. \tperm{Reserved -> Frozen})
+        \end{itemize}
+\end{itemize}
+
+\paragraph*{When writing through a pointer \tcode{y}}
+\begin{itemize}
+    \item for all ancestors \tcode{x} of \tcode{y} (including \texttt{y}), this is a child write
+        \begin{itemize}
+            \item turn \tperm{Future Write} into \tperm{Write} (i.e. \tperm{Reserved -> Active})
+            \item it is UB to encounter \tperm{!Write} (either \tperm{Disabled} or \tperm{Frozen})
+        \end{itemize}
+    \item for all non-ancestors \tcode{z} of \tcode{y} (excluding \tcode{y}), this is a foreign write
+        \begin{itemize}
+            \item if \tcode{z} is protected this is always UB; otherwise
+            \item if \tcode{z} is \tperm{Reserved} and has interior mutability it is unchanged; otherwise
+            \item turn \tperm{Write} and `Future Write` into \tperm{!Write} as well as \tperm{Read} into \tperm{!Read}
+                (i.e. \tperm{Reserved -> Disabled} and \tperm{Active -> Disabled})
+        \end{itemize}
+\end{itemize}
 
 
 \section{Tree Borrows implemented}
 
 \subsection{Testing the Rust Standard Library}
+
+We used the method described in
+\href{https://github.com/rust-lang/miri-test-stdlib}{\texttt{github:rust-lang/miri-test-stdlib}}
+to evaluate on the Standard Library that Tree Borrows does not declare "too much UB",
+in other words that the code that is currently in use is not considered UB according
+to Tree Borrows.
+
+We found two tests that were rejected by Tree Borrows, both were instances of the
+following pattern:
+\begin{lstlisting}
+let mut root = 6u8;        // Base pointer: Active
+let mref = &mut root;      // Direct child: Reserved
+let ptr = mref as *mut u8; // Uses the same tag as mref
+// Write to ptr makes it Active
+*ptr = 0;
+// Parent read from the point of view of ptr makes it Frozen
+assert_eq!(root, 0);
+// Attempted write is rejected because Frozen forbids writes
+*ptr = 0;
+\end{lstlisting}
+
+This pattern was previously accepted by Stacked Borrows, but has now been determined
+to be arguably a violation of uniqueness that should not have been accepted in the
+first place as well as easy to patch. The fix (which simply consists of
+replacing \texttt{\&mut root} with \texttt{addr\_of\_mut!(root)}) was accepted
+in \href{https://github.com/rust-lang/rust/pull/107954}{github:rust-lang/rust/pull/107954}.
+
+
+Other widely used libraries such as \texttt{rand} and \texttt{tokio} already
+satisfy the requirements of Tree Borrows, suggesting that most codebases will
+need few to no changes if they are to enforce the Tree Borrows semantics.
 
 \subsection{Performance concerns and optimizations}
 
@@ -572,12 +1256,20 @@ permissions updated on the corresponding range. On allocations with many reborro
 this can easily lead to a naive implementation of Tree Borrows being slower than
 Stacked Borrows by an arbitrarily large multiplicative factor.
 
+
 Fortunately Tree Borrows has access to easy optimizations that allow it to have
 an execution time in the same order of magnitude as that of Stacked Borrows on
 realistic code samples. We observe that in practice the slowdown from Stacked Borrows
 to Tree Borrows is mostly less than x2 on benchmarks that are specifically designed
 to stress the borrow tracker, and about x1.3 on general tests that don't particularly attempt to
 push the borrow tracker to its limits.
+
+Note further that the benchmarks that follow compare a very optimized implementation
+of Stacked Borrows with a Tree Borrows implementation that was only optimized up to
+the point that it would not waste too much time. Fine-tuning the garbage collector
+of unused tags and implementing a cache are likely to improve the performance of
+Tree Borrows as they have already done for Stacked Borrows.
+
 
 
 \begin{tabular}{|l|l|c|c|c|c|}
