@@ -1,0 +1,71 @@
+\NeedsTeXFormat{LaTeX2e}[1999/12/01]
+\ProvidesPackage{../rustlistings}
+
+\RequirePackage{listings}
+\RequirePackage{xcolor}
+
+% language definition
+
+\lstdefinelanguage{rust}{
+	keywords={fn,mut,const,match,if,then,else,impl,usize,isize,u32,i32,u8,i8,u16,i16,u64,i64,self,Self,let,enum,struct,ref,move,for,while,in,as,unsafe,retag,return,static,break,where,pub,type,trait},
+        emph={'a,'b,'c,'static,'id,'new_id}, % I tried writing something smart that gets all identifiers starting with ', but failed. So here we go, listing all lifetimes we use.
+	sensitive=true,
+	morecomment=[l]{//},
+        morecomment=[s]{/*}{*/},
+	morestring=[b]",
+        alsoletter={'},
+}
+
+\definecolor{StringRed}{rgb}{.637,0.082,0.082}
+\definecolor{CommentGreen}{rgb}{0.0,0.55,0.3}
+\definecolor{LifetimeCol}{RGB}{255,127,36}
+\definecolor{CommentCol}{RGB}{80,80,80}
+
+\definecolor{darkgreen}{rgb}{0.0,0.7,0.0}
+
+\definecolor{KeywordBlue}{rgb}{0.0,0.3,0.55}
+\definecolor{LinkColor}{rgb}{0.55,0.0,0.3}
+\definecolor{CiteColor}{rgb}{0.55,0.0,0.3}
+\definecolor{HighlightColor}{rgb}{0.0,0.0,0.0}
+
+\lstset{
+  mathescape=true,
+	basicstyle=\ttfamily\small,
+	keywordstyle=\color{blue}\bfseries,
+	identifierstyle=\color{CommentGreen},
+	stringstyle=\color{StringRed},
+	emphstyle=\color{LifetimeCol},
+	commentstyle=\color{CommentCol}\itshape,
+	tabsize=4,
+        numbers=left,
+        xleftmargin=14pt,
+        showstringspaces=false,
+        columns=flexible,
+}
+
+\newcommand{\rstinline}[1]{\lstinline[language=rust,basicstyle=\ttfamily]{#1}}
+\newcommand{\cppinline}[1]{\lstinline[language=c++,basicstyle=\ttfamily]{#1}}
+
+% \lstnewenvironment{rust}
+%   {\lstset{
+%    language=rust,
+%    numbers=none,
+%    xleftmargin=0pt,
+%    escapechar=§,
+%    commentstyle=\itshape,
+%    belowskip=-6pt
+%   }}
+%   {}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% LIFETIME VISUALIZATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newcommand\ShowLifetime[2]{\tikz[remember picture]{
+\draw #2;
+\draw[inner sep=0pt, densely dotted, rounded corners=1ex] (current bounding box.south west) rectangle (current bounding box.north east);
+\node[above left] at (current bounding box.south east) {\small Lifetime \rstinline{#1}};
+%HACK because we cannot use [overlay] because that breaks bbox computation
+\pgfresetboundingbox
+\path[use as bounding box] (0,0);
+}}

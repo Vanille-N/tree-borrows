@@ -23,7 +23,8 @@
 \usepackage{mathtools}
 \usepackage{subcaption}
 
-\usepackage{listings} % replace with nice syntax hl
+\usepackage{listings}
+\usepackage{rustlistings}
 
 \bibliographystyle{plainurl}
 
@@ -53,9 +54,8 @@
 \newtheorem*{remark}{Remark}
 \newtheorem{openquestion}[theorem]{Open question}
 
-\newcommand{\tcode}[1]{\texttt{#1}}
+\newcommand{\tcode}[1]{\rstinline{#1}}
 \newcommand{\tperm}[1]{\texttt{#1}}
-\newcommand{\tsub}[1]{\textsubscript{#1}}
 
 % Well-parenthesized commands
 \newcommand{\set}[1]{\ensuremath{\left\{#1\right\}}}
@@ -131,7 +131,7 @@ optimizations.
 \subsection{Motivating example}
 
 As a first concrete example, consider the following function:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 fn example1(x: &mut u64, y: &mut u64) -> u64 {
      let xval = *x; // First read of *x
      *y = xval + 1;
@@ -156,7 +156,7 @@ Indeed there exists in Rust the \tcode{unsafe} keywords which
 allows the programmer to bypass certain compiler checks by extending their
 available instruction set: among other things the \tcode{unsafe} keyword allows
 dereferencing raw pointers in the following manner:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 fn context1() {
     let mut data = 42u64;
     let data_ptr = &mut data as *mut u64;
@@ -233,14 +233,14 @@ mostly the different kinds of pointers available -- and provide an intuition
 for the aliasing constraints they should satisfy.
 
 We call ``safe Rust'' the subset of the complete Rust language (more explicitly called ``unsafe Rust'')
-that does not use the \tcode{unsafe} keyword (and thus does not use any \texttt{unsafe}
+that does not use the \tcode{unsafe} keyword (and thus does not use any \tcode{unsafe}
 instructions).
 
 \subsection{References and raw pointers}
 
 Rust offers a kind of pointer with more guarantees than its counterpart in most
-languages: references. Written \tcode{\&} (\texttt{let x:~\&T = \&t;}) or
-\tcode{\&mut} (\texttt{let x:~\&mut T = \&mut t;}) for immutable and mutable
+languages: references. They are written \tcode{\&} (as in \tcode{let x: \&T = \&t;}) or
+\tcode{\&mut} (as in \tcode{let x: \&mut T = \&mut t;}) for immutable and mutable
 references respectively.
 
 These references should satisfy ``aliasing XOR mutability'': for a given memory
@@ -253,7 +253,7 @@ As a means of interfacing with C code and expressing complex pointer manipulatio
 Rust also offers another type of pointers, called raw pointers, written
 \tcode{*const T} for immutable raw pointers and \tcode{*mut T} for mutable
 raw pointers. There pointers can bypass some requirements of references (there
-can exist multiple \texttt{*mut T} to the same location), but their use is more
+can exist multiple \tcode{*mut T} to the same location), but their use is more
 dangerous and dereferencing raw pointers can be done only in blocks marked by
 the keyword \tcode{unsafe \{...\}} thus their use is usually restricted to
 situations where they are absolutely necessary.
@@ -261,7 +261,7 @@ Several \tcode{*mut T} can exist simultaneously.
 
 
 The following snippet shows some conversions between these kinds of pointers:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 let mut data = 42u64;
 let some_mut_ref: &mut u64 = &mut data;
 let const_from_mut: &u64 = &*some_mut_ref;
@@ -269,6 +269,58 @@ let reborrow_mut: &mut u64 = &mut *some_mut_ref;
 let mut_ptr: *mut u64 = &mut *some_mut_ref as *mut u64;
 let ref_from_ptr: &mut u64 = unsafe { &mut *mut_ptr };
 \end{lstlisting}
+
+\subsection{2-phased borrows}
+
+``2-phased borrows'' are a special case of mutable borrows where requirements
+are relaxed in a way that often spares from having to introduce temporary variables
+and thinking about the order in which arguments of a function are computed.
+
+When a mutable reference is passed as a function argument, there is a guarantee
+that it will not actually be used mutably before function entry. Thus the compiler
+can tolerate read-only accesses until function entry.
+
+The following code features one such 2-phased borrow:
+\begin{lstlisting}[language=rust]
+impl X {
+    fn method(&mut self, ...) { ... }
+}
+
+x: &mut X
+x.method(arg1, arg2, ...);
+\end{lstlisting}
+where the method call desugars to approximately
+\begin{lstlisting}[language=rust]
+let x_bor: &mut *x;
+// 2-phased borrow for x_bor begins
+let arg1 = ...;
+let arg2 = ...;
+// 2-phased borrow for x_bor ends and actual mutable borrow begins
+X::method(x_bor, arg1, arg2, ...);
+\end{lstlisting}
+% FIXME: box around the zone
+
+As a concrete example, consider
+\begin{lstlisting}[language=rust]
+v: &mut Vec<usize>
+v.push(v.len());
+\end{lstlisting}
+which the Borrow Checker accepts.
+In the absence of 2-phased borrows at all, one would have to write
+\begin{lstlisting}[language=rust]
+v: &mut Vec<usize>
+{ let l = v.len();
+  v.push(l); }
+\end{lstlisting}
+
+More generally, the existence of 2-phased borrows suggests the possibility of a mutable
+borrow being ``delayed'': as long as it has not yet been accessed mutably, it still
+tolerates shared read-only access.
+In the compiler this behavior is only present for function arguments that are
+implicitly reborrowed (no \tcode{\&mut} appears in the source code), but since it
+executes at runtime Tree Borrows can make a finer analysis and apply this behavior
+to all mutable borrows.
+
 
 \section{Limitations of existing tools}
 
@@ -284,17 +336,17 @@ We show here that there are both places where strictly adhering to the behavior
 of the Borrow Checker would lead to too little UB and others where there would
 be too much UB.
 
-However in places where Tree Borrows does not follow the same rules as the
+However even in places where Tree Borrows does not follow the same rules as the
 Borrow Checker the following should always hold: code that does not use
 \tcode{unsafe} \textit{and} is accepted by the Borrow Checker should never
 be UB.
 
-\paragraph*{Bypassing the Borrow Checker with \texttt{unsafe} code.}
+\paragraph*{Bypassing the Borrow Checker with \tcode{unsafe} code.}
 The Borrow Checker does not track borrows for raw pointers, so the easiest
 --- but usually incorrect --- way to resolve compilation errors raised by the
 Borrow Checker is to insert round trips to cast references to and from raw
 pointers as follows
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Rejected by the Borrow Checker.
 // Expected to be UB.
 fn alternate_writes() {
@@ -330,7 +382,7 @@ UB at runtime. If some piece of code is unreachable then it cannot produce UB.
 
 This is however not true of the Borrow Checker, which has to operate at compile-time,
 as shown by the following example
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Rejected by the Borrow Checker.
 // Expected to not be UB.
 fn unreachable_borrow() {
@@ -364,7 +416,7 @@ that did not contain any is not a valid optimization.
 Thus of the two following functions, in which the only difference is a reordering
 of read-only accesses, only one is UB and replacing the other with it is not
 a valid program transformation.
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // UB according to Stacked Borrows.
 fn read_xy() {
     let x = &mut 0u8;
@@ -389,7 +441,7 @@ the data under a shared reference, even if there is no write access involved.
 Since this is needlessly strict and also an instance of the previous concern on
 reads not invalidating reads, we do not wish for Tree Borrows to declare a simple
 creation without access of a mutable reference to be a write access.
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // UB according to Stacked Borrows.
 // Should not be UB according to Tree Borrows.
 fn unused_borrow() {
@@ -400,9 +452,7 @@ fn unused_borrow() {
 }
 \end{lstlisting}
 
-\paragraph*{Proper implementation of 2-phase borrows.}
-% FIXME: introduction to 2-phase borrows before this point, here is only
-% how SB handles it. Or rather how it doesn't.
+\paragraph*{Proper implementation of 2-phased borrows.}
 As stated in \cite{rustc_dev_guide}, 2-phase borrows should act as shared references
 during their reserved phase. This is not how Stacked Borrows defines them: in
 Stacked Borrows, 2-phase borrows are raw pointers before their activation.
@@ -413,7 +463,7 @@ are never 2-phase borrows adds to the confusion: this makes programs suddently
 become UB if we remove some \tcode{\&mut*} or if we inline some functions.
 We wish for Tree Borrows's handling of 2-phase borrows to be more strict and
 more consistent.
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Not UB according to Stacked Borrows.
 // Should be UB according to Tree Borrows.
 fn write_during_2phase() {
@@ -446,7 +496,7 @@ Stacked Borrows needs to know at the moment of reborrow the range that a pointer
 covers. This in particular makes it unable to handle types of unknown size and
 accesses outside of the reborrowed range.
 As an example the following code is rejected by Stacked Borrows:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // UB according to Stacked Borrows.
 // Should not be UB according to Tree Borrows.
 fn offset_outside_reborrowed_range() {
@@ -459,6 +509,7 @@ fn offset_outside_reborrowed_range() {
 \section{The Tree Borrows aliasing model}
 
 \subsection{Tree Structure}
+\label{sec:tree-structure}
 
 The core principle of Tree Borrows is that in order to detect aliasing between
 pointers we associate a \textit{permission} to each pointer. Conflicting aliases
@@ -481,7 +532,7 @@ which other pointers, and we store this information in a \textit{borrow tree}.
 
 For each memory location, we maintain a borrow tree which contains
 the following data:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Per-tag data consists of
 // - permissions
 // - local tree structure
@@ -521,9 +572,9 @@ pointee type,
         associated permissions.
 \end{itemize}
 
-Moreover for the purposes of what we will discuss in \ref{TODO}, creation of
-a child tag from a parent tag \tcode{x} counts as a read access through \tcode{x}.
-Among other things, this action ensures that \tcode{x} actually has permission to
+Moreover for the purposes of what we will discuss in Section \ref{sec:transitions}, creation of
+a child tag \tcode{y} from a parent tag \tcode{x} counts as a read access through \tcode{y}.
+Among other things, this action ensures that \tcode{y} actually has permission to
 access the locations it is being reborrowed on.
 
 No read access will be performed and no new tag will be created in the following
@@ -545,16 +596,16 @@ borrow tree itself can be shared at the allocation level.
 
 \subsubsection{Navigating the Tree}
 
-For the purposes of the permission update mechanism described in \ref{TODO},
+For the purposes of the permission update mechanism described in Section \ref{sec:transitions},
 we introduce here some terminology.
 
-Consider a tag \tcode{t\tsub{0}} through which an access was performed, and a tag
-\tcode{t\tsub{1}} from the same allocation whose permissions will be updated. From the point
-of view of \tcode{t\tsub{1}} we call an access through \tcode{t\tsub{0}} a \textit{child access}
-if \tcode{t\tsub{0}} is a transitive child of \tcode{t\tsub{1}} (including \tcode{t\tsub{1}} itself).
-In all other cases --- which include strict transitive parents of \tcode{t\tsub{1}} as well as
-all pointers who do not share a branch with \tcode{t\tsub{1}} --- we call an access through
-\tcode{t\tsub{0}} a \textit{foreign access}.
+Consider a tag \tcode{t0} through which an access was performed, and a tag
+\tcode{t1} from the same allocation whose permissions will be updated. From the point
+of view of \tcode{t1} we call an access through \tcode{t0} a \textit{child access}
+if \tcode{t0} is a transitive child of \tcode{t1} (including \tcode{t1} itself).
+In all other cases --- which include strict transitive parents of \tcode{t1} as well as
+all pointers who do not share a branch with \tcode{t1} --- we call an access through
+\tcode{t0} a \textit{foreign access}.
 
 \begin{figure}
     \includegraphics[width=\textwidth]{../figs/accesses-kinds.pdf}
@@ -576,12 +627,12 @@ Pointers can have the following permissions:
 \end{itemize}
 
 We choose to introduce \tperm{Future Write} permissions as a way for Tree Borrows to
-natively handle 2-phase borrows, as is explained in \ref{TODO}.
+natively handle 2-phased borrows.
 This does not directly allow write accesses through this pointer, but it reserves
 a right to obtain such \tperm{Write} permissions later in the execution.
 
 Tree Borrows uses the following combinations of permissions:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 enum ReadWritePerms {
     Reserved = Read + Future Write,
     Active = Read + Write,
@@ -592,61 +643,24 @@ enum ReadWritePerms {
 
 They are to be interpreted in the following way:
 \begin{itemize}
-    \item a \tperm{Disabled} tag corresponds to a pointer whose lifetime has ended;
-    \item a \tperm{Frozen} tag gives read-only permissions to a pointer, so it is suitable
-        for shared references without interior mutability;
-    \item an \tperm{Active} tag corresponds to a mutable reference that is currently being used mutably;
-    \item a \tperm{Reserved} tag corresponds to a mutable reference that has not been used mutably yet.
+    \item a \tperm{Disabled} tag is for a pointer whose lifetime has ended;
+    \item a \tperm{Frozen} tag is for a shared references without interior mutability;
+    \item an \tperm{Active} tag is for an activated mutable reference;
+    \item a \tperm{Reserved} tag is for a 2-phased borrowed mutable reference.
 \end{itemize}
 
-\subsubsection{The purpose of \tperm{Future Write}}
+\subsubsection{2-phase for all borrows}
 
-The following code features a so-called ``2-phased borrow'':
-\begin{lstlisting}
-impl X {
-    fn method(&mut self, ...) { ... }
-}
+As we have explained, \tperm{Reserved} represents mutable references with
+a 2-phased borrow not yet activated.
 
-x: &mut X
-x.method(arg1, arg2, ...);
-\end{lstlisting}
-where the method call desugars to approximately
-\begin{lstlisting}
-let x_bor: &mut *x;
-                    -----
-let arg1 = ...;         |--- special zone within which x is still accessible,
-let arg2 = ...;         |    but only immutably
-                    -----
-X::method(x_bor, arg1, arg2, ...);
-\end{lstlisting}
-% FIXME: box around the zone
-
-As a concrete example, consider
-\begin{lstlisting}
-v: &mut Vec<usize>
-v.push(v.len());
-\end{lstlisting}
-which the Borrow Checker accepts despite rejecting the following
-\begin{lstlisting}
-v: &mut Vec<usize>
-let w = &mut *v;
-let l = v.len();
-Vec::push(w, l);
-\end{lstlisting}
-
-Therefore the existence of 2-phase borrows suggests the possibility of a mutable
-borrow being ``delayed'': as long as it has not yet been accessed mutably, it still
-tolerates shared read-only access. In other words, it does not have a \tperm{Write}
-permission yet, but can obtain one in the future. This is exactly how our
-\tperm{Future Write} permission is set to behave.
-
-Rather than limiting this behavior to 2-phase borrows only, we choose in Tree
+Rather than limiting this behavior to 2-phased borrows only, we choose in Tree
 Borrows to make all mutable borrows behave in a uniform way: all mutable references
 will wait until their first write access to claim their \tperm{Write} permission,
 and will allow shared read-only access in the meantime. If not for this, a lot
 of code currently being written would not be accepted, such as some code that
 follows the following pattern
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
                              // More generally:
 let ptr = vec.as_mut_ptr();  // - some mutable reborrow
 if vec.len() > 0 {           // - use base pointer immutably
@@ -655,7 +669,7 @@ if vec.len() > 0 {           // - use base pointer immutably
 \end{lstlisting}
 
 A concrete example currently in use in the standard library test suite:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 let mut x = 2;
 let xref = &mut x;
 let xraw = &mut *xref as *mut _; // create a mutable reborrow
@@ -667,7 +681,7 @@ unsafe {
 assert_eq!(x, 4);
 \end{lstlisting}
 
-Extending the behavior of 2-phase borrows to all mutable borrows also serves
+Extending the behavior of 2-phased borrows to all mutable borrows also serves
 towards our goal of allowing all reorderings of read-only operations: it lets
 us exchange reads through mutable (but not used mutably) references with each
 other and with reborrows of other mutable references.
@@ -675,26 +689,27 @@ other and with reborrows of other mutable references.
 \subsubsection{Initialization}
 
 The initial permissions depend of the type of borrow.
-Recall from \ref{TODO} that raw pointers do not receive new permissions and instead
+Recall from \ref{sec:tree-structure} that raw pointers do not receive new permissions and instead
 use the same tag and permissions as their parent pointer. This leaves mutable and
 shared references for which we must determine an initial permission.
 
 All references obtain a \tperm{Read} permission initially. This is required
 because we perform a fake read access upon reborrowing a reference, and it asserts
-that all references are dereferenceable (they are tagged \texttt{dereferenceable}
+that all references are dereferenceable (they are tagged \tcode{dereferenceable}
 in LLVM).
 
 In addition, mutable references obtain a \tperm{Future Write} permission upon initialization
 making them \tperm{Reserved}, while shared references receive \tperm{!Write} which makes them \tperm{Frozen}.
 
 \subsection{Updates}
+\label{sec:transitions}
 
 We now describe how permissions are updated after an access is performed.
 The update process is roughly as follows.
 
-In reaction to an access at \tcode{t\tsub{0}}, traverse the tree. For each \tcode{t\tsub{1}} node of the
-tree, if \tcode{t\tsub{0}} is a child of \tcode{t\tsub{1}} then the access is a child access at \tcode{t\tsub{1}}; otherwise
-it is a foreign access at \tcode{t\tsub{1}}. Based on the type of access (both child/foreign
+In reaction to an access at \tcode{t0}, traverse the tree. For each \tcode{t1} node of the
+tree, if \tcode{t0} is a child of \tcode{t1} then the access is a child access at \tcode{t1}; otherwise
+it is a foreign access at \tcode{t1}. Based on the type of access (both child/foreign
 and read/write) and some local information, determine the new permissions for the
 pointer.
 
@@ -710,6 +725,7 @@ pointer.
 \end{figure}
 
 \subsubsection{Intuition on effects of accesses}
+\label{sec:transitions-basic}
 
 \paragraph*{Child accesses}
 
@@ -740,7 +756,7 @@ If another mutable reference is accessed, which corresponds to a foreign write,
 then this \tperm{Active} must lose all permissions and become \tperm{Disabled}.
 
 According to the Borrow Checker, an \tperm{Active} loses all permissions on a foreign read:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Example 3.A.1
 fn main() {
     let base = &mut 42u64;
@@ -763,7 +779,7 @@ any two adjacent read accesses, which means in particular that reordering two
 reads should not introduce new UB.
 
 The following piece of code is accepted:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Example 3.A.2
 fn main() {
     let base = &mut 42u64;
@@ -789,13 +805,13 @@ both examples above \tperm{???} should be \tperm{Frozen} and UB occurs in neithe
 \paragraph*{Foreign accesses on Reserved}
 
 \tperm{Reserved} is a more special case, and its behavior is guided by the following examples:
-\begin{lstlisting}
-// Example 3.R.1: Foreign read (standard 2-phase borrow example)
+\begin{lstlisting}[language=rust]
+// Example 3.R.1: Foreign read (standard 2-phased borrow example)
 // This must not be UB
 fn main() {
     let mut x = vec![];
     // x: Reserved
-    x.push( // 2-phase borrow starts here for x' implicitly reborrowed from x
+    x.push( // 2-phased borrow starts here for x' implicitly reborrowed from x
         // x: Reserved
         // |-- x': Active
         x.len() // Foreign read for x'
@@ -803,13 +819,13 @@ fn main() {
         // thus a foreign read must not affect Reserved tags.
     );
 }
-```
+\end{lstlisting}
 
-\begin{lstlisting}
-// Example 3.R.1': Foreign read outside 2-phase borrow
+\begin{lstlisting}[language=rust]
+// Example 3.R.1': Foreign read outside 2-phased borrow
 // This is a very common pattern in the standard library, it must NOT be UB.
 // This also justifies why we need to use Reserved for all mutable references,
-// and not exclusively for 2-phase borrows.
+// and not exclusively for 2-phased borrows.
 fn main() {
     let mut x = 2;
     let xref = &mut x;
@@ -828,7 +844,7 @@ fn main() {
 }
 \end{lstlisting}
 
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Example 3.R.2: Foreign write
 // This should be UB
 fn main() {
@@ -847,9 +863,7 @@ fn main() {
                // turn into Disabled, which causes UB in this example as desired.
     *x = 3;
 }
-\end{lstlisting}
 
-\begin{lstlisting}
 // Example 3.R.2': Foreign write with interior mutability
 // This must not be UB
 fn main() {
@@ -861,7 +875,7 @@ fn main() {
     let mut x = Cell::new(1);
     // x: Reserved
     x.do_the_thing({
-        // A 2-phase starts here for x' implicitly reborrowed from x
+        // A 2-phased borrow starts here for x' implicitly reborrowed from x
         // x: Reserved
         // |-- x': Reserved
         x.set(3) // This is a foreign write for x'
@@ -889,7 +903,7 @@ fn main() {
 From the above we can observe that all transitions follow the order
 \tperm{Reserved < Active < Frozen < Disabled}, which corresponds to the permissions
 during a ``normal'' lifetime of a mutable reference: it is \tperm{Reserved} upon creation
-to accomodate for 2-phase borrows, then eventually becomes \tperm{Active} on the first
+to accomodate for 2-phased borrows, then eventually becomes \tperm{Active} on the first
 child write. The next foreign read marks the end of its period of exclusive access
 and it can now only be accessed immutably by becoming \tperm{Frozen}. Eventually its
 lifetime ends altogether as a different branch claims exclusive access, it
@@ -897,8 +911,8 @@ becomes \tperm{Disabled} and will remain so forever.
 
 \subsubsection{Automata of Permissions}
 
-The full automata of how permissions react to accesses can be seen in \ref{TODO}.
-For now this is nothing more than the aggregation of everything established in \ref{TODO}.
+The full automata of how permissions react to accesses can be seen in Figure \ref{fig:state-machine-noprotect}.
+For now this is nothing more than the aggregation of everything established previously in Section \ref{sec:transitions-basic}.
 
 \begin{figure}
     \includegraphics[width=\textwidth]{../figs/state-machine_noprotect.pdf}
@@ -906,7 +920,7 @@ For now this is nothing more than the aggregation of everything established in \
     \label{fig:state-machine-noprotect}
 \end{figure}
 
-A possible interpretation of these transitions:
+A possible interpretation of these transitions would be the following:
 \begin{itemize}
     \item in reaction to a child access, the state will advance forward according to \tperm{<} until
         it has obtained the required read or write permissions for the access to be performed
@@ -950,7 +964,7 @@ The compiler optimizations that Tree Borrows should justify include LLVM optimiz
 thus Tree Borrows must not allow violations of assumptions made by LLVM. Among these
 assumptions is \tcode{noalias} which specifies to what extent a pointer passed as an
 argument to a function aliases with other pointers. In Rust, mutable and shared
-references are both marked \tcode{noalias}.
+references in function arguments are both marked \tcode{noalias}.
 
 % FIXME: quote
 \begin{indent}
@@ -977,7 +991,7 @@ not be both child and foreign accesses for this tag if at least one of them is a
 
 This means that the following pieces of code must be Undefined Behavior,
 but with the current model not all of them are:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 // Example 3.N.1
 fn main() {
     let data = &mut 42u64;
@@ -995,8 +1009,7 @@ fn main() {
         // (With the current model no UB occurs)
     }
 }
-\end{lstlisting}
-\begin{lstlisting}
+
 // Example 3.N.2
 fn main() {
     let data = &mut 42u64;
@@ -1014,8 +1027,7 @@ fn main() {
         // (With the current model no UB occurs)
     }
 }
-\end{lstlisting}
-\begin{lstlisting}
+
 // Example 3.N.3
 fn main() {
     let data = &mut 42u64;
@@ -1032,8 +1044,7 @@ fn main() {
         // -- UB must occur before this point --
     }
 }
-\end{lstlisting}
-\begin{lstlisting}
+
 // Example 3.N.4
 fn main() {
     let data = &mut 42u64;
@@ -1063,7 +1074,7 @@ us:
         \tperm{Frozen -> Disabled} should be UB on any accessed location;
     \item the same remark applies to a \tperm{Reserved} or \tperm{Active} becoming \tperm{Disabled};
     \item (\textit{Example 3.N.2}) an \tperm{Active} becoming \tperm{Frozen} indicates the presence of a child write
-        (requirement for the existence of an \texttt{Active}) and a foreign write (only possible cause
+        (requirement for the existence of an \tperm{Active}) and a foreign write (only possible cause
         of the transition). These two accesses violate \tcode{noalias}, thus a transition \tperm{Active -> Frozen}
         should be UB;
     \item (\textit{Example 3.N.1}) after a foreign read has occured, \tperm{Reserved} must no longer allow
@@ -1090,7 +1101,7 @@ version of the transitions). In order to not declare too much UB, we also add
 to each state a boolean field \tcode{accessed}, which is initially \tcode{false} and becomes
 \tcode{true} on the first child access.
 
-Being protected thus modifies the behavior of pointers in the way described in \ref{TODO}.
+Being protected thus modifies the behavior of pointers in the way described in \ref{fig:state-machine}.
 
 \begin{figure}
     \includegraphics[width=\textwidth]{../figs/state-machine.pdf}
@@ -1116,7 +1127,7 @@ Tree Borrows is capable of handling pointers with unknown size as well as using
 a pointer to access data outside of the range it was reborrowed for.
 
 One such case is
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 fn access_after_offset() { unsafe {
     let data: [u64; 2] = [0, 1];
     let fst = &mut data[0] as *mut u64;
@@ -1139,7 +1150,7 @@ We do not perform a read access on reborrow for locations outside of the range.
 \subsubsection{On whether to propagate loss of permissions}
 
 Consider the following pattern:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 let x = &mut 42u64;
 // x: Reserved
 let y = &mut *x; // Child read for x
@@ -1217,7 +1228,7 @@ accesses would cause UB), but never in a way that would affect detection of UB.
 
 \paragraph*{When writing through a pointer \tcode{y}}
 \begin{itemize}
-    \item for all ancestors \tcode{x} of \tcode{y} (including \texttt{y}), this is a child write
+    \item for all ancestors \tcode{x} of \tcode{y} (including \tcode{y}), this is a child write
         \begin{itemize}
             \item turn \tperm{Future Write} into \tperm{Write} (i.e. \tperm{Reserved -> Active})
             \item it is UB to encounter \tperm{!Write} (either \tperm{Disabled} or \tperm{Frozen})
@@ -1244,7 +1255,7 @@ to Tree Borrows.
 
 We found two tests that were rejected by Tree Borrows, both were instances of the
 following pattern:
-\begin{lstlisting}
+\begin{lstlisting}[language=rust]
 let mut root = 6u8;        // Base pointer: Active
 let mref = &mut root;      // Direct child: Reserved
 let ptr = mref as *mut u8; // Uses the same tag as mref
@@ -1259,7 +1270,7 @@ assert_eq!(root, 0);
 This pattern was previously accepted by Stacked Borrows, but has now been determined
 to be arguably a violation of uniqueness that should not have been accepted in the
 first place as well as easy to patch. The fix (which simply consists of
-replacing \texttt{\&mut root} with \texttt{addr\_of\_mut!(root)}) was accepted
+replacing \tcode{\&mut root} with \tcode{addr\_of\_mut!(root)}) was accepted
 in \href{https://github.com/rust-lang/rust/pull/107954}{github:rust-lang/rust/pull/107954}.
 
 
