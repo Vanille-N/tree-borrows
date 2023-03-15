@@ -35,7 +35,6 @@
 \newcommand{\fakeparagraph}[2]{\par\noindent\textbf{#1}\hspace{1em}#2}
 
 \usepackage{thm-restate}
-\usepackage{cite}
 
 % Problem definition environment
 \newfloat{problemdef}{htbp}{loa}
@@ -153,7 +152,7 @@ by whom, in what contexts or in which manner mutable references are ``required''
 to be unique. This is the purpose of Tree Borrows.
 
 Indeed there exists in Rust the \tcode{unsafe} keywords which
-allows the programmer to bypass certain compiler checks by extending their
+allows the programmer to bypass certain compiler checks by extending the
 available instruction set: among other things the \tcode{unsafe} keyword allows
 dereferencing raw pointers in the following manner:
 \begin{lstlisting}[language=rust]
@@ -210,15 +209,21 @@ UB. Tree Borrows should thus:
         Each program retroactively declared to exhibit UB is a violation of backwards compatibility,
         we must ensure that these are few and justifiable.
         To check this aspect we implement the Tree Borrows semantics in the Miri
-        interpreter and run the OS-independent part of the Rust standard library
-        test suite using this semantics. We found very few rejected instances, and
-        the suggested changes were accepted and merged back into the standard library.
+        interpreter and run existing test suites of various projects using this semantics.
+        We found very few rejected instances, and all of them were accepted as
+        code that should have been written differently. We thus conclude that the Tree Borrows
+        semantics are in accordance with most idiomatic Rust code currently in use.
     \item \textbf{Have rules that are simple, consistent and intuitive.}
         While it is difficult to measure this objectively, we argue that compared
-        to its predecessor Stacked Borrows, Tree Borrows is more consistent in
-        its handling of pointers. In particular a number of bug reports on the
-        Github page of Miri show that users misunderstand some details of the
-        behavior of Stacked Borrows, and we have ensured that such misunderstandings
+        to its predecessor Stacked Borrows introduced in \cite{stacked_borrows},
+        Tree Borrows is more consistent in its handling of pointers. In particular
+        a number of bug reports on the Github page of Miri \cite{miri} (issues
+        \href{https://github.com/rust-lang/miri/issues/1666}{\#1666},
+        \href{https://github.com/rust-lang/miri/issues/1878}{\#1878},
+        \href{https://github.com/rust-lang/miri/issues/2082}{\#2082},
+        \href{https://github.com/rust-lang/miri/issues/2722}{\#2722}
+        ) show that users misunderstand some details of the behavior of Stacked Borrows,
+        and we have ensured that such misunderstandings
         are not present in Tree Borrows.
     \item \textbf{Be efficient.} In addition to being humanly understandable, Tree Borrows
         should also be verifiable in practice without too much overhead in Miri.
@@ -689,7 +694,7 @@ other and with reborrows of other mutable references.
 \subsubsection{Initialization}
 
 The initial permissions depend of the type of borrow.
-Recall from \ref{sec:tree-structure} that raw pointers do not receive new permissions and instead
+Recall from Section \ref{sec:tree-structure} that raw pointers do not receive new permissions and instead
 use the same tag and permissions as their parent pointer. This leaves mutable and
 shared references for which we must determine an initial permission.
 
@@ -967,18 +972,16 @@ argument to a function aliases with other pointers. In Rust, mutable and shared
 references in function arguments are both marked \tcode{noalias}.
 
 % FIXME: quote
-\begin{indent}
+\begin{minipage}{0.7\textwidth}
     \tcode{noalias}
 
-    \begin{indent}
-        This indicates that memory locations accessed via pointer values based on the argument
-        are not also accessed, during the execution of the function, via pointer values not based on
-        the argument. This guarantee only holds for memory locations that are modified,
-        by any means, during the execution of the function.
-    \end{indent}
+    This indicates that memory locations accessed via pointer values based on the argument
+    are not also accessed, during the execution of the function, via pointer values not based on
+    the argument. This guarantee only holds for memory locations that are modified,
+    by any means, during the execution of the function.
 
     --- from the \href{https://llvm.org/docs/LangRef.html}{LLVM Language Reference Manual}
-\end{indent}
+\end{minipage}
 
 This can be reworded in language closer to Tree Borrows:
 
@@ -1101,7 +1104,7 @@ version of the transitions). In order to not declare too much UB, we also add
 to each state a boolean field \tcode{accessed}, which is initially \tcode{false} and becomes
 \tcode{true} on the first child access.
 
-Being protected thus modifies the behavior of pointers in the way described in \ref{fig:state-machine}.
+Being protected thus modifies the behavior of pointers in the way described in Figure \ref{fig:state-machine}.
 
 \begin{figure}
     \includegraphics[width=\textwidth]{../figs/state-machine.pdf}
@@ -1237,7 +1240,7 @@ accesses would cause UB), but never in a way that would affect detection of UB.
         \begin{itemize}
             \item if \tcode{z} is protected this is always UB; otherwise
             \item if \tcode{z} is \tperm{Reserved} and has interior mutability it is unchanged; otherwise
-            \item turn \tperm{Write} and `Future Write` into \tperm{!Write} as well as \tperm{Read} into \tperm{!Read}
+            \item turn \tperm{Write} and \tperm{Future Write} into \tperm{!Write} as well as \tperm{Read} into \tperm{!Read}
                 (i.e. \tperm{Reserved -> Disabled} and \tperm{Active -> Disabled})
         \end{itemize}
 \end{itemize}
@@ -1376,11 +1379,108 @@ Tree Borrows as they have already done for Stacked Borrows.
 
 \subsection{Proving optimizations}
 
+We show a sketch of how to use Tree Borrows to prove some reordering-based optimization
+\begin{lstlisting}{language=rust}
+fn example2_unopt(x: &u64) -> u64 {
+    let val = *x;
+    g(); // unknown code modeled by a function call
+    val
+}
 
-%%
-%% Bibliography
-%%
-% Rustc dev guide: https://rustc-dev-guide.rust-lang.org/borrow_check/two_phase_borrows.html
+fn example2_opt(x: &u64) -> u64 {
+    g();
+    *x
+}
+\end{lstlisting}
+
+For the above reordering to be valid, the following needs to hold.
+For any definition of \tcode{g}, for any context \(C\), if \(C[\texttt{example2\_unopt}]\)
+does not exhibit UB then \(C[\texttt{example2\_opt}]\) also does not exhibit UB.
+We call \(C[\texttt{example2\_unopt}]\) the source, and \(C[\texttt{example2\_opt}]\)
+the target.
+
+It is sufficient to prove that if \tcode{example2\_unopt} and \tcode{example2\_opt}
+are executed with the same memory state and initial borrow tree
+for which \tcode{example2\_unopt} does not trigger UB then
+\begin{itemize}
+    \item \tcode{example2\_opt} does not trigger UB, and
+    \item they both modify the memory in the same way, and
+    \item they return the same value, and
+    \item they result in the same final borrow tree.
+\end{itemize}
+
+Indeed if neither triggers UB immediately and they result in the same memory
+state and borrow tree then the two versions of the function will be indistinguishable
+without UB in the source.
+
+We mark the following notable points of the code:
+\begin{lstlisting}[language=rust]
+fn example2_unopt(x: &u64) -> u64 {
+    // s0
+    let val = *x;
+    // s1
+    g();
+    // s2
+    val
+    // s3
+}
+
+fn example2_opt(x: &u64) -> u64 {
+    // t0
+    g();
+    // t1
+    *x
+    // t3
+}
+\end{lstlisting}
+and denote \(T(x)\) and \(M(x)\) the tree and memory at the execution point \(x\).
+
+Let \(l\) the location that \tcode{x} points to: \(M(s_0)[l]\) is the value
+of \tcode{*x} at \(s_0\).
+
+We first show that \tcode{g} must not perform a write to \(l\). We have created
+a fresh tag \(p_x\) for \tcode{x} and no child tag of \(p_x\) has been passed
+to \tcode{g}, thus any access that occurs during \tcode{g} is a foreign access
+for \(p_x\). Since \(p_x\) is protected, any foreign write would be UB, thus
+\tcode{g} can be assumed not to perform any write access to \(l\).
+Therefore the value at \(l\) in unchanged during the execution of \tcode{g} in
+the source. This proves that both functions return the same value.
+
+Assuming \(M(s_0) = M(t_0)\) since the two functions are to be executed in the
+same context, and since no write occurs at all between \(s_0\) and \(s_1\)
+we thus obtain \(M(s_1) = M(t_0)\). In the source and the target the whole memory
+is identical when \tcode{g} is called, thus \tcode{g} executes in the same way
+in both. Since no memory modification occurs between \(s_2\) and \(s_3\) or between
+\(t_1\) and \(t_3\), we obtain that \(M(s_3) = M(t_3)\).
+
+What remains is to show that the source and target result in the same
+borrow tree and that the target does not have UB. Since \(T(t_0)\) refines
+\(T(s_1)\), no UB occurs in the target during the execution of \tcode{g}.
+We then examine what happens to all borrows for the location:
+\begin{itemize}
+    \item \(p_x\) in the source is subjected to a child read then zero or more
+        child reads during \tcode{g}. It does not matter the order, the final
+        permission of \(p_x\) will be the same in the target, i.e. \tperm{Frozen};
+    \item there are no children of \(p_x\);
+    \item non-children of \(p_x\) that already existed before the execution
+        of the function are subjected in the target to the operations in \tcode{g}
+        then a read of \(t_x\) instead of the opposite in the source. We easily
+        check that in the state machine all transitions induced by read accesses
+        (both child and foreign) commute with each other and thus the final
+        permissions are the same in the source and in the target.
+    \item non-children of \(p_x\) that were created during the execution of \tcode{g}
+        are not protected when \tcode{*x} is read in the target and they are not
+        \tperm{Active} because creating an \tperm{Active} requires a write.
+        The read is thus a no-op.
+\end{itemize}
+
+We thus have shown that in the absence of UB in the source,
+\(T(s_0) = T(t_0) \Longrightarrow T(s_3) = T(t_3)\) and
+thus the source and target have the same behavior, and moving a read access
+down across unknown code within a function is a valid optimization.
+
+
+% ------------------------------------------------------------------------------
 
 \bibliography{literature}
 
