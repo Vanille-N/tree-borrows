@@ -223,8 +223,8 @@ UB. Tree Borrows should thus:
         \href{https://github.com/rust-lang/miri/issues/2082}{\#2082},
         \href{https://github.com/rust-lang/miri/issues/2722}{\#2722}
         ) show that users misunderstand some details of the behavior of Stacked Borrows,
-        and we have ensured that such misunderstandings
-        are not present in Tree Borrows.
+        and in Tree Borrows we have made the behavior of different kinds of pointers
+        more consistent to try to minimize such misunderstandings.
     \item \textbf{Be efficient.} In addition to being humanly understandable, Tree Borrows
         should also be verifiable in practice without too much overhead in Miri.
         We compare it to benchmarks of Stacked Borrows and observe a noticeable slowdown,
@@ -490,7 +490,7 @@ fn write_during_reborrow() {
     let x = &mut 0u8;
     let xraw = x as *mut u8;
     print(
-        &mut *x,
+        &mut *x, // Only this line differs from the previous example
         unsafe { *xraw += 1; },
     );
 }
@@ -537,45 +537,26 @@ Tree Borrows has the property that the update of permissions is a process
 that only requires local information concerning which pointers were derived from
 which other pointers, and we store this information in a \textit{borrow tree}.
 
-\subsubsection{Creation of a new Node}
+\subsubsection{Additions to the tree}
 
-For each memory location, we maintain a borrow tree which contains
-the following data:
-\begin{lstlisting}[language=rust]
-// Per-tag data consists of
-// - permissions
-// - local tree structure
-struct Node {
-    // The pointer (identified by its tag) that this node represents
-    tag: Tag,
-    // The parent pointer; the root has no parent
-    parent: Option<Tag>,
-    // The child pointers
-    children: Vec<Tag>,
-    // The current permissions associated with this tag
-    permissions: ReadWritePerms,
-    /* Some lazy initialization and debug information omitted */
-}
+All pointers tracked by Tree Borrows have an associated tag, and each tag is
+mapped to one node of the borrow tree. The structure and contents of the borrow tree
+define
+\begin{itemize}
+    \item the \textit{parent} tag and \textit{child} tags;
+    \item the permission that each tag has over each location of the allocation.
+\end{itemize}
 
-// Per-location data consists of
-// - aggregated per-tag data for all relevant tags
-struct Tree {
-    root_tag: Tag,
-    nodes: Map<Tag, Node>,
-}
-\end{lstlisting}
-
-All pointers tracked by Tree Borrows have an associated tag. Several pointers
-can share the same tag, making them indistinguishable from each other.
+Several pointers can share the same tag, making them indistinguishable from each other
+from the point of view of Tree Borrows: to Tree Borrows, the tag used for the access
+and the range of memory that was accessed are the only available informations.
 
 When a new pointer \tcode{y} is derived from an existing pointer \tcode{x}, depending
 on the kind of operation that caused the creation of \tcode{y} and the underlying
 pointee type,
 
 \begin{itemize}
-    \item either \tcode{y} will receive the same tag as \tcode{x} meaning that from this
-        point onwardS \tcode{x} and \tcode{y} are indistinguishable from the point of view of Tree
-        Borrows,
+    \item either \tcode{y} will receive the same tag as \tcode{x};
     \item or a new fresh tag will be created, associated with \tcode{y}, and recorded in the
         tree stucture as a child of the tag of \tcode{x}. This new tag will have its own
         associated permissions.
@@ -954,6 +935,7 @@ from the tree traversal if the next access is also of the same kind.
 
 
 \subsubsection{Protectors}
+\label{sec:need-protect}
 
 The compiler optimizations that Tree Borrows should justify include LLVM optimizations,
 thus Tree Borrows must not allow violations of assumptions made by LLVM. Among these
@@ -961,139 +943,62 @@ assumptions is \tcode{noalias} which specifies to what extent a pointer passed a
 argument to a function aliases with other pointers. In Rust, mutable and shared
 references in function arguments are both marked \tcode{noalias}.
 
-% FIXME: quote
-\begin{minipage}{0.7\textwidth}
-    \tcode{noalias}
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.8\textwidth}
+        \tcode{noalias}
 
-    This indicates that memory locations accessed via pointer values based on the argument
-    are not also accessed, during the execution of the function, via pointer values not based on
-    the argument. This guarantee only holds for memory locations that are modified,
-    by any means, during the execution of the function.
+        This indicates that memory locations accessed via pointer values based on the argument
+        are not also accessed, during the execution of the function, via pointer values not based on
+        the argument. This guarantee only holds for memory locations that are modified,
+        by any means, during the execution of the function.
 
-    --- from the \href{https://llvm.org/docs/LangRef.html}{LLVM Language Reference Manual}
-\end{minipage}
+        --- from the \href{https://llvm.org/docs/LangRef.html}{LLVM Language Reference Manual}
+    \end{minipage}
+\end{figure}
 
 This can be reworded in language closer to Tree Borrows:
 
-\begin{indent}
-An access via pointer values based on the argument is a child access.
-An access via pointer values *not* based on the argument is a foreign access.
-If a tag is marked noalias then during the execution of the function there must
-not be both child and foreign accesses for this tag if at least one of them is a write access.
-\end{indent}
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.8\textwidth}
+        An access via pointer values based on the argument is a \textbf{child access}.
 
-This means that the following pieces of code must be Undefined Behavior,
-but with the current model not all of them are:
-\begin{lstlisting}[language=rust]
-// Example 3.N.1
-fn main() {
-    let data = &mut 42u64;
-    let y = data as *const u64;
-    let x = &mut *data;
-    foreign_read_before_write(x, y);
-    fn foreign_read_before_write(x: &mut u64, y: *const u64) {
-        // x: Reserved [noalias]
-        let _ = unsafe { *y }; // Foreign read for x
-        // x: Reserved [noalias]
-        *x += 1; // Child write for x
-        // /!\ Combined with the previous foreign read this is a noalias violation
-        // x: Active [noalias]
-        // -- UB must occur before this point --
-        // (With the current model no UB occurs)
-    }
-}
+        An access via pointer values \textbf{not} based on the argument is a \textbf{foreign access}.
 
-// Example 3.N.2
-fn main() {
-    let data = &mut 42u64;
-    let y = data as *const u64;
-    let x = &mut *data;
-    write_before_foreign_read(x, y);
-    fn write_before_foreign_read(x: &mut u64, y: *const u64) {
-        // x: Reserved [noalias]
-        *x += 1; // Child write for x
-        // x: Active [noalias]
-        let _ = unsafe { *y }; // Foreign read for x
-        // /!\ Combined with the previous child write this is a noalias violation
-        // x: Frozen [noalias]
-        // -- UB must occur before this point --
-        // (With the current model no UB occurs)
-    }
-}
+        If a tag is marked noalias then during the execution of the function there must
+        not be both child and foreign accesses relative to this tag if at least one of them is a write access.
+    \end{minipage}
+\end{figure}
 
-// Example 3.N.3
-fn main() {
-    let data = &mut 42u64;
-    let y = data as *mut u64;
-    let x = &*data;
-    foreign_write_before_read(x, y);
-    fn foreign_write_before_read(x: &u64, y: *mut u64) {
-        // x: Frozen [noalias]
-        unsafe { *y += 1; } // Foreign write for x
-        // x: Disabled [noalias]
-        let _ = *x; // Child read for x which has !Write
-        // /!\ Combined with the previous foreign write this is a noalias violation
-        // This is already (correctly) UB in the current model
-        // -- UB must occur before this point --
-    }
-}
+This makes several pieces of code that would be allowed according to the model so
+far be UB according to LLVM. Any code that is UB according to LLVM must also be
+UB according to Rust. Examples of such code are shown in Appendix \ref{app:need-protect}.
 
-// Example 3.N.4
-fn main() {
-    let data = &mut 42u64;
-    let y = data as *mut u64;
-    let x = &*data;
-    read_before_foreign_write(x, y);
-    fn read_before_foreign_write(x: &u64, y: *mut u64) {
-        // x: Frozen [noalias]
-        let _ = *x; // Child read for x
-        // x: Frozen [noalias]
-        unsafe { *y += 1; } // Foreign write for x
-        // /!\ Combined with the previous child read this is a noalias violation
-        // x: Disabled [noalias]
-        // -- UB must occur before this point --
-        // (With the current model no UB occurs)
-    }
-}
-\end{lstlisting}
-
-Only in \textit{Example 3.N.3} is there indeed UB. Here is what the other examples teach
-us:
-
-\begin{itemize}
-    \item (\textit{Example 3.N.4}) a \tperm{Frozen} becoming \tperm{Disabled} indicates the presence of a
-        foreign write (only possible cause of the transition). If the location was also accessed
-        through any child access, then these two accesses violate \tcode{noalias}, thus a transition
-        \tperm{Frozen -> Disabled} should be UB on any accessed location;
-    \item the same remark applies to a \tperm{Reserved} or \tperm{Active} becoming \tperm{Disabled};
-    \item (\textit{Example 3.N.2}) an \tperm{Active} becoming \tperm{Frozen} indicates the presence of a child write
-        (requirement for the existence of an \tperm{Active}) and a foreign write (only possible cause
-        of the transition). These two accesses violate \tcode{noalias}, thus a transition \tperm{Active -> Frozen}
-        should be UB;
-    \item (\textit{Example 3.N.1}) after a foreign read has occured, \tperm{Reserved} must no longer allow
-        child writes. We model this by making it \tperm{Frozen}, which means that the next attempted child write
-        would be UB;
-    \item for the same reason \tperm{Reserved} must not stay \tperm{Reserved} after a foreign write even
-        if it has interior mutability. We declare that under foreign write, \tperm{Reserved} becomes
-        \tperm{Disabled} which means that the next attempted child read or write would be UB.
-\end{itemize}
-
-In terms of read and write permissions, this means that compared to the previous
-model without protectors, additional UB occurs on any transition that causes
-\tperm{Read -> !Read} or \tperm{Write -> !Write}.
-
-Once the function has returned, the pointer is no longer subjected to \tcode{noalias}
-and it resumes reacting ``normally'' to accesses.
-
-To handle this new addition to the model we introduce \textit{Protectors}. Upon function
-entry, we add a Protector to every reference passed as argument (Implementation:
+To remedy this and properly detect this kind of UB, we introduce \textit{Protectors}.
+Upon function entry, we add a Protector to every reference passed as argument (Implementation:
 simply maintain a \tcode{HashSet} containing call ids of functions that have not yet
 returned and their reference arguments, and query this set on each transition
 to know if this tag's permissions should follow the protected or unprotected
 version of the transitions). In order to not declare too much UB, we also add
-to each state a boolean field \tcode{accessed}, which is initially \tcode{false} and becomes
-\tcode{true} on the first child access.
+to each state a boolean field \tcode{accessed}, which is initially \tcode{false}
+and becomes \tcode{true} on the first child access.
 
+We apply the following rules to pointers that have an active protector
+(when the protector is removed upon function exit, these rules no longer apply):
+
+\begin{itemize}
+    \item any transition \tperm{Frozen -> Disabled}, \tperm{Active -> Frozen},
+        \tperm{Active -> Disabled}, \tperm{Reserved -> Disabled} on a permission of a protected
+        pointer is UB;
+    \item \tperm{Reserved} is affected by foreign reads and writes regardless of interior mutability,
+        it always becomes \tperm{Frozen} after a foreign read and \tperm{Disabled} after a foreign write.
+\end{itemize}
+
+In terms of read and write permissions, this means that compared to the previous
+model without protectors, additional UB occurs on any transition that causes
+\tperm{Read -> !Read} or \tperm{Write -> !Write}, and \tperm{Future Write} is not
+compatible with foreign reads.
 Being protected thus modifies the behavior of pointers in the way described in Figure \ref{fig:state-machine}.
 
 \begin{figure}
@@ -1117,9 +1022,7 @@ We can thus still rely on the effect of every access being idempotent.
 \subsubsection{Accesses outside of initial range}
 
 Tree Borrows is capable of handling pointers with unknown size as well as using
-a pointer to access data outside of the range it was reborrowed for.
-
-One such case is
+a pointer to access data outside of the range it was reborrowed for. One such case is
 \begin{lstlisting}[language=rust]
 fn access_after_offset() { unsafe {
     let data: [u64; 2] = [0, 1];
@@ -1129,7 +1032,7 @@ fn access_after_offset() { unsafe {
 } }
 \end{lstlisting}
 Here the reborrow for \tcode{fst} only covers \tcode{data[0]}, but \tcode{snd} is then derived from
-\tcode{fst} and translated outside of its original range. As we still wish to check
+\tcode{fst} and offset outside of its original range. As we still wish to check
 that even for these accesses no aliasing assumptions are violated, we track
 permissions even for locations outside of the range of the initial reborrow.
 
@@ -1463,10 +1366,12 @@ detection algorithm from prior work.
 
 % ------------------------------------------------------------------------------
 
+\newpage
+
 \bibliography{literature}
 
-
 \newpage
+
 \appendix
 
 \section{Benchmarks for Section \ref{sec:perf}}
@@ -1530,5 +1435,98 @@ By default Stacked Borrows is used, and Tree Borrows is selected by appending
             \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib -- --skip encode\_decode}
         \end{description}
 \end{itemize}
+
+\section{Requirements of protectors}
+\label{app:need-protect}
+
+To show why protectors are needed and why they require some alternative
+transitions, we show here examples of programs that are UB according to LLVM,
+but would not be UB according to Tree Borrows \textbf{if protected pointers behaved identically to unprotected pointers}.
+This is a continuation of the example shown in Section \ref{sec:need-protect}.
+
+\subsection{Increased requirements of \tperm{Reserved}}
+
+The following program justifies that after a foreign read has occured, \tperm{Reserved} must no longer allow
+foreign reads. Indeed if \tperm{Reserved} is unaffected by foreign reads then it allows a foreign read
+followed by a child write. We model this by making \tperm{Reserved} become \tperm{Frozen} on a foreign read,
+which means that the next attempted child write would correctly be UB.
+
+For the same reason \tperm{Reserved} must not stay \tperm{Reserved} after a foreign write even
+if it has interior mutability: we declare that under a foreign write, \tperm{Reserved} becomes
+\tperm{Disabled} regardless of interior mutability which means that the next attempted child read or write would be UB.
+
+\begin{lstlisting}[language=rust]
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *const u64;
+    let x = &mut *data;
+    foreign_read_before_write(x, y);
+    fn foreign_read_before_write(x: &mut u64, y: *const u64) {
+        // x: Reserved [noalias]
+        let _ = unsafe { *y }; // Foreign read for x
+        // x: Reserved [noalias]
+        *x += 1; // Child write for x
+        // /!\ Combined with the previous foreign read this is a noalias violation
+        // x: Active [noalias]
+        // -- UB must occur before this point --
+        // (Without protectors no UB occurs)
+    }
+}
+\end{lstlisting}
+
+
+\subsection{Loss of \tperm{Read} permissions}
+
+A \tperm{Frozen} pointer becoming \tperm{Disabled} is a symptom that a foreign write occured after
+a child read. Indeed a foreign write is only possible cause of the transition in question.
+If the location was also accessed through any child access, then these two accesses violate
+\tcode{noalias}, thus a transition \tperm{Frozen -> Disabled} should be UB on any accessed location.
+The same remark applies to a \tperm{Reserved} or \tperm{Active} becoming \tperm{Disabled}.
+
+\begin{lstlisting}[language=rust]
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *mut u64;
+    let x = &*data;
+    read_before_foreign_write(x, y);
+    fn read_before_foreign_write(x: &u64, y: *mut u64) {
+        // x: Frozen [noalias]
+        let _ = *x; // Child read for x
+        // x: Frozen [noalias]
+        unsafe { *y += 1; } // Foreign write for x
+        // /!\ Combined with the previous child read this is a noalias violation
+        // x: Disabled [noalias]
+        // -- UB must occur before this point --
+        // (Without protectors no UB occurs)
+    }
+}
+\end{lstlisting}
+
+
+\subsection{Loss of \tperm{Write} permissions}
+
+An \tperm{Active} pointer becoming \tperm{Frozen} indicates the presence of a child write
+(requirement for the existence of an \tperm{Active}) and a foreign write (only possible cause
+of the transition). These two accesses violate \tcode{noalias}, thus a transition \tperm{Active -> Frozen}
+should be UB.
+
+\begin{lstlisting}[language=rust]
+fn main() {
+    let data = &mut 42u64;
+    let y = data as *const u64;
+    let x = &mut *data;
+    write_before_foreign_read(x, y);
+    fn write_before_foreign_read(x: &mut u64, y: *const u64) {
+        // x: Reserved [noalias]
+        *x += 1; // Child write for x
+        // x: Active [noalias]
+        let _ = unsafe { *y }; // Foreign read for x
+        // /!\ Combined with the previous child write this is a noalias violation
+        // x: Frozen [noalias]
+        // -- UB must occur before this point --
+        // (Without protectors no UB occurs)
+    }
+}
+\end{lstlisting}
 
 \end{document}
