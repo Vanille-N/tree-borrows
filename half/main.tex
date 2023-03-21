@@ -231,6 +231,10 @@ UB. Tree Borrows should thus:
         but not to the point that it would be an obstacle to the usability of Miri.
 \end{itemize}
 
+\subsection{Related work}
+
+% FIXME
+
 \section{Aliasing in Rust}
 
 In this section we explain the features of Rust that we are interacting with --
@@ -275,9 +279,9 @@ let mut_ptr: *mut u64 = &mut *some_mut_ref as *mut u64;
 let ref_from_ptr: &mut u64 = unsafe { &mut *mut_ptr };
 \end{lstlisting}
 
-\subsection{2-phased borrows}
+\subsection{two-phase borrows}
 
-``2-phased borrows'' are a special case of mutable borrows where requirements
+``two-phase borrows'' are a special case of mutable borrows where requirements
 are relaxed in a way that often spares from having to introduce temporary variables
 and thinking about the order in which arguments of a function are computed.
 
@@ -285,7 +289,7 @@ When a mutable reference is passed as a function argument, there is a guarantee
 that it will not actually be used mutably before function entry. Thus the compiler
 can tolerate read-only accesses until function entry.
 
-The following code features one such 2-phased borrow:
+The following code features one such two-phase borrow:
 \begin{lstlisting}[language=rust]
 impl X {
     fn method(&mut self, ...) { ... }
@@ -297,10 +301,10 @@ x.method(arg1, arg2, ...);
 where the method call desugars to approximately
 \begin{lstlisting}[language=rust]
 let x_bor: &mut *x;
-// 2-phased borrow for x_bor begins
+// two-phase borrow for x_bor begins
 let arg1 = ...;
 let arg2 = ...;
-// 2-phased borrow for x_bor ends and actual mutable borrow begins
+// two-phase borrow for x_bor ends and actual mutable borrow begins
 X::method(x_bor, arg1, arg2, ...);
 \end{lstlisting}
 % FIXME: box around the zone
@@ -311,14 +315,14 @@ v: &mut Vec<usize>
 v.push(v.len());
 \end{lstlisting}
 which the Borrow Checker accepts.
-In the absence of 2-phased borrows at all, one would have to write
+In the absence of two-phase borrows at all, one would have to write
 \begin{lstlisting}[language=rust]
 v: &mut Vec<usize>
 { let l = v.len();
   v.push(l); }
 \end{lstlisting}
 
-More generally, the existence of 2-phased borrows suggests the possibility of a mutable
+More generally, the existence of two-phase borrows suggests the possibility of a mutable
 borrow being ``delayed'': as long as it has not yet been accessed mutably, it still
 tolerates shared read-only access.
 In the compiler this behavior is only present for function arguments that are
@@ -457,16 +461,16 @@ fn unused_borrow() {
 }
 \end{lstlisting}
 
-\paragraph*{Proper implementation of 2-phased borrows.}
-As stated in \cite{rustc_dev_guide}, 2-phase borrows should act as shared references
+\paragraph*{Proper implementation of two-phase borrows.}
+As stated in \cite{rustc_dev_guide}, two-phase borrows should act as shared references
 during their reserved phase. This is not how Stacked Borrows defines them: in
-Stacked Borrows, 2-phase borrows are raw pointers before their activation.
+Stacked Borrows, two-phase borrows are raw pointers before their activation.
 
 In particular the following piece of code shows the kind of pattern that this
 improperly allows. The fact that explicit reborrows of the form \tcode{\&mut *x}
-are never 2-phase borrows adds to the confusion: this makes programs suddently
+are never two-phase borrows adds to the confusion: this makes programs suddently
 become UB if we remove some \tcode{\&mut*} or if we inline some functions.
-We wish for Tree Borrows's handling of 2-phase borrows to be more strict and
+We wish for Tree Borrows's handling of two-phase borrows to be more strict and
 more consistent.
 \begin{lstlisting}[language=rust]
 // Not UB according to Stacked Borrows.
@@ -601,8 +605,8 @@ borrow tree itself can be shared at the allocation level.
 
 \subsubsection{Navigating the Tree}
 
-For the purposes of the permission update mechanism described in Section \ref{sec:transitions},
-we introduce here some terminology.
+To help the description of the permission update mechanism described in
+Section \ref{sec:transitions}, we introduce here some terminology.
 
 Consider a tag \tcode{t0} through which an access was performed, and a tag
 \tcode{t1} from the same allocation whose permissions will be updated. From the point
@@ -610,7 +614,8 @@ of view of \tcode{t1} we call an access through \tcode{t0} a \textit{child acces
 if \tcode{t0} is a transitive child of \tcode{t1} (including \tcode{t1} itself).
 In all other cases --- which include strict transitive parents of \tcode{t1} as well as
 all pointers who do not share a branch with \tcode{t1} --- we call an access through
-\tcode{t0} a \textit{foreign access}.
+\tcode{t0} a \textit{foreign access}. These two kinds of accesses are shown
+in Figure \ref{fig:kinds-of-accesses}.
 
 \begin{figure}
     \includegraphics[width=\textwidth]{../figs/accesses-kinds.pdf}
@@ -632,7 +637,7 @@ Pointers can have the following permissions:
 \end{itemize}
 
 We choose to introduce \tperm{Future Write} permissions as a way for Tree Borrows to
-natively handle 2-phased borrows.
+natively handle two-phase borrows.
 This does not directly allow write accesses through this pointer, but it reserves
 a right to obtain such \tperm{Write} permissions later in the execution.
 
@@ -651,25 +656,25 @@ They are to be interpreted in the following way:
     \item a \tperm{Disabled} tag is for a pointer whose lifetime has ended;
     \item a \tperm{Frozen} tag is for a shared references without interior mutability;
     \item an \tperm{Active} tag is for an activated mutable reference;
-    \item a \tperm{Reserved} tag is for a 2-phased borrowed mutable reference.
+    \item a \tperm{Reserved} tag is for a two-phase borrowed mutable reference.
 \end{itemize}
 
-\subsubsection{2-phase for all borrows}
+\subsubsection{two-phase for all borrows}
 
 As we have explained, \tperm{Reserved} represents mutable references with
-a 2-phased borrow not yet activated.
+a two-phase borrow not yet activated.
 
-Rather than limiting this behavior to 2-phased borrows only, we choose in Tree
+Rather than limiting this behavior to two-phase borrows only, we choose in Tree
 Borrows to make all mutable borrows behave in a uniform way: all mutable references
 will wait until their first write access to claim their \tperm{Write} permission,
 and will allow shared read-only access in the meantime. If not for this, a lot
 of code currently being written would not be accepted, such as some code that
 follows the following pattern
 \begin{lstlisting}[language=rust]
-                             // More generally:
+                               // More generally:
 let ptr = vec.as_mut_ptr();  // - some mutable reborrow
-if vec.len() > 0 {           // - use base pointer immutably
-   do_stuff(ptr)             // - then use the reborrow
+if vec.len() > 0 {             // - use base pointer immutably
+   do_stuff(ptr)               // - then use the reborrow
 }
 \end{lstlisting}
 
@@ -686,7 +691,7 @@ unsafe {
 assert_eq!(x, 4);
 \end{lstlisting}
 
-Extending the behavior of 2-phased borrows to all mutable borrows also serves
+Extending the behavior of two-phase borrows to all mutable borrows also serves
 towards our goal of allowing all reorderings of read-only operations: it lets
 us exchange reads through mutable (but not used mutably) references with each
 other and with reborrows of other mutable references.
@@ -811,12 +816,12 @@ both examples above \tperm{???} should be \tperm{Frozen} and UB occurs in neithe
 
 \tperm{Reserved} is a more special case, and its behavior is guided by the following examples:
 \begin{lstlisting}[language=rust]
-// Example 3.R.1: Foreign read (standard 2-phased borrow example)
+// Example 3.R.1: Foreign read (standard two-phase borrow example)
 // This must not be UB
 fn main() {
     let mut x = vec![];
     // x: Reserved
-    x.push( // 2-phased borrow starts here for x' implicitly reborrowed from x
+    x.push( // two-phase borrow starts here for x' implicitly reborrowed from x
         // x: Reserved
         // |-- x': Active
         x.len() // Foreign read for x'
@@ -824,13 +829,11 @@ fn main() {
         // thus a foreign read must not affect Reserved tags.
     );
 }
-\end{lstlisting}
 
-\begin{lstlisting}[language=rust]
-// Example 3.R.1': Foreign read outside 2-phased borrow
+// Example 3.R.1': Foreign read outside two-phase borrow
 // This is a very common pattern in the standard library, it must NOT be UB.
 // This also justifies why we need to use Reserved for all mutable references,
-// and not exclusively for 2-phased borrows.
+// and not exclusively for two-phase borrows.
 fn main() {
     let mut x = 2;
     let xref = &mut x;
@@ -847,9 +850,7 @@ fn main() {
                           // them Frozen.
     assert_eq!(x, 4);
 }
-\end{lstlisting}
 
-\begin{lstlisting}[language=rust]
 // Example 3.R.2: Foreign write
 // This should be UB
 fn main() {
@@ -880,7 +881,7 @@ fn main() {
     let mut x = Cell::new(1);
     // x: Reserved
     x.do_the_thing({
-        // A 2-phased borrow starts here for x' implicitly reborrowed from x
+        // A two-phase borrow starts here for x' implicitly reborrowed from x
         // x: Reserved
         // |-- x': Reserved
         x.set(3) // This is a foreign write for x'
@@ -903,29 +904,18 @@ fn main() {
 }
 \end{lstlisting}
 
-\paragraph*{Ordering of states}
+\subsubsection{Interpretation of transitions using an ordering}
 
-From the above we can observe that all transitions follow the order
+From the conclusions of Section \ref{sec:transitions-basic} we can observe that all transitions follow the order
 \tperm{Reserved < Active < Frozen < Disabled}, which corresponds to the permissions
 during a ``normal'' lifetime of a mutable reference: it is \tperm{Reserved} upon creation
-to accomodate for 2-phased borrows, then eventually becomes \tperm{Active} on the first
+to accomodate for two-phase borrows, then eventually becomes \tperm{Active} on the first
 child write. The next foreign read marks the end of its period of exclusive access
 and it can now only be accessed immutably by becoming \tperm{Frozen}. Eventually its
 lifetime ends altogether as a different branch claims exclusive access, it
 becomes \tperm{Disabled} and will remain so forever.
 
-\subsubsection{Automata of Permissions}
-
-The full automata of how permissions react to accesses can be seen in Figure \ref{fig:state-machine-noprotect}.
-For now this is nothing more than the aggregation of everything established previously in Section \ref{sec:transitions-basic}.
-
-\begin{figure}
-    \includegraphics[width=\textwidth]{../figs/state-machine_noprotect.pdf}
-    \caption{State machine for the update of permissions. This version is not complete yet.}
-    \label{fig:state-machine-noprotect}
-\end{figure}
-
-A possible interpretation of these transitions would be the following:
+A possible interpretation of the established transitions would be the following:
 \begin{itemize}
     \item in reaction to a child access, the state will advance forward according to \tperm{<} until
         it has obtained the required read or write permissions for the access to be performed
@@ -1241,7 +1231,7 @@ accesses would cause UB), but never in a way that would affect detection of UB.
             \item if \tcode{z} is protected this is always UB; otherwise
             \item if \tcode{z} is \tperm{Reserved} and has interior mutability it is unchanged; otherwise
             \item turn \tperm{Write} and \tperm{Future Write} into \tperm{!Write} as well as \tperm{Read} into \tperm{!Read}
-                (i.e. \tperm{Reserved -> Disabled} and \tperm{Active -> Disabled})
+                (i.e. \tperm{Reserved -> Disabled} and \tperm{Active -> Disabled} and \tperm{Frozen -> Disabled})
         \end{itemize}
 \end{itemize}
 
@@ -1249,9 +1239,10 @@ accesses would cause UB), but never in a way that would affect detection of UB.
 \section{Tree Borrows implemented}
 
 \subsection{Testing the Rust Standard Library}
+\label{sec:testing_stdlib}
 
 We used the method described in
-\href{https://github.com/rust-lang/miri-test-stdlib}{\texttt{github:rust-lang/miri-test-stdlib}}
+\href{https://github.com/rust-lang/miri-test-libstd}{\texttt{github:rust-lang/miri-test-libstd}}
 to evaluate on the Standard Library that Tree Borrows does not declare ``too much UB'',
 in other words that the code that is currently in use is not considered UB according
 to Tree Borrows.
@@ -1273,15 +1264,18 @@ assert_eq!(root, 0);
 This pattern was previously accepted by Stacked Borrows, but has now been determined
 to be arguably a violation of uniqueness that should not have been accepted in the
 first place as well as easy to patch. The fix (which simply consists of
-replacing \tcode{\&mut root} with \tcode{addr\_of\_mut!(root)}) was accepted
+replacing \tcode{\&mut root as *mut _} with \tcode{addr\_of\_mut!(root)}) was accepted
 in \href{https://github.com/rust-lang/rust/pull/107954}{github:rust-lang/rust/pull/107954}.
 
 
 Other widely used libraries such as \texttt{rand} and \texttt{tokio} already
 satisfy the requirements of Tree Borrows, suggesting that most codebases will
 need few to no changes if they are to enforce the Tree Borrows semantics.
+Checking more thoroughly that this is actually the case is one of the ambitions of our future
+work.
 
 \subsection{Performance concerns and optimizations}
+\label{sec:perf}
 
 Tree Borrows is slower than Stacked Borrows.
 
@@ -1293,7 +1287,7 @@ Stacked Borrows by an arbitrarily large multiplicative factor.
 
 Fortunately Tree Borrows has access to easy optimizations that allow it to have
 an execution time in the same order of magnitude as that of Stacked Borrows on
-realistic code samples. We observe that in practice the slowdown from Stacked Borrows
+realistic code samples. We observe in Figure \ref{fig:perf} that in practice the slowdown from Stacked Borrows
 to Tree Borrows is mostly less than x2 on benchmarks that are specifically designed
 to stress the borrow tracker, and about x1.3 on general tests that don't particularly attempt to
 push the borrow tracker to its limits.
@@ -1305,82 +1299,60 @@ of unused tags and implementing a cache are likely to improve the performance of
 Tree Borrows as they have already done for Stacked Borrows.
 
 
-
-\begin{tabular}{|l|l|c|c|c|c|}
-    \hline
-    Project & Test & Runs & SB & TB & Factor \\
-    \hline
-    \multirow{2}{9em}{Miri}
-        & \texttt{slice-get-unchecked} & 5 & 0.56s & 4.15s & {\color{Red}x7.41} \\
-        & \texttt{mse} & 5 & 0.67s & 1.42s & {\color{Red}x2.12} \\
-        & \texttt{serde1} & 5 & 1.53s & 2.60s & {\color{YellowOrange}x1.70} \\
-        & \texttt{serde2} & 5 & 3.19s & 5.16s & {\color{YellowOrange}x1.62} \\
-        & \texttt{unicode} & 5 & 1.27s & 1.99s & {\color{YellowOrange}x1.57} \\
-        & \texttt{backtraces} & 5 & 4.01s & 5.81s & {\color{YellowOrange}x1.45} \\
-    \hline
-    \multirow{3}{9em}{Stdlib}
-        & \texttt{core} & 1 & 4m31s & 9m15s & {\color{Red}x2.05} \\
-        & \texttt{alloc} & 1 & 4m45s & 5m54s & {\color{LimeGreen}x1.24} \\
-        & \texttt{std/time} & 1 & 15.1s & 17.5s & {\color{LimeGreen}x1.16} \\
-    \hline
-    \multirow{1}{9em}{Regex}
-        & \texttt{lib} & 1 & 13.3s & 20.6s & {\color{YellowOrange}x1.54} \\
-    \multirow{1}{9em}{Hashbrown}
-        & \texttt{lib} & 1 & 31.5s & 38.3s & {\color{LimeGreen}x1.21} \\
-    \multirow{1}{9em}{Tokio}
-        & \texttt{lib} & 1 & 40.7s & 45.3s & {\color{LimeGreen}x1.11} \\
-    \multirow{1}{9em}{Rand}
-        & \texttt{lib} & 1 & 1m24s & 1m31s & {\color{LimeGreen}x1.08} \\
-    \hline
-\end{tabular}
-
-\begin{itemize}
-    \item Miri
-        \begin{description}
-            \item[Source] \href{https://github.com/rust-lang/miri}{\texttt{github:rust-lang/miri}}
-            \item[Command] \texttt{MIRIFLAGS="" ./miri bench}
-        \end{description}
-    \item Miri-test-stdlib
-        \begin{description}
-            \item[Source] \href{https://github.com/rust-lang/miri-test-stdlib}{\texttt{github:rust-lang/miri-test-stdlib}}
-            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh core --lib --tests}
-            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh alloc --lib --tests}
-            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation"}\\
-                \texttt{./run-test.sh std --lib --tests -- time::}
-        \end{description}
-    \item Tokio
-        \begin{description}
-            \item[Source] \href{https://github.com/tokio-rs/tokio}{\texttt{github:tokio-rs/tokio}}
-            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tag-raw-pointers"} \\
-                \texttt{cargo +nightly miri test --features full --lib}
-        \end{description}
-    \item Rand
-        \begin{description}
-            \item[Source] \href{https://github.com/rust-random/rand}{\texttt{github:rust-random/rand}}
-            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
-        \end{description}
-    \item Hashbrown
-        \begin{description}
-            \item[Source] \href{https://github.com/rust-lang/hashbrown}{\texttt{github:rust-lang/hashbrown}}
-            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
-        \end{description}
-    \item Regex
-        \begin{description}
-            \item[Source] \href{https://github.com/rust-lang/regex}{\texttt{github:rust-lang/regex}}
-            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib -- --skip encode\_decode}
-        \end{description}
+\begin{figure}
+    \centering
+    \begin{tabular}{|l|l|c|c|c|c|}
+        \hline
+        Project & Test & Runs & SB & TB & Factor \\
+        \hline
+        \multirow{2}{9em}{Miri}
+            & \texttt{slice-get-unchecked} & 5 & 0.56s & 4.15s & {\color{Red}x7.41} \\
+            & \texttt{mse} & 5 & 0.67s & 1.42s & {\color{Red}x2.12} \\
+            & \texttt{serde1} & 5 & 1.53s & 2.60s & {\color{YellowOrange}x1.70} \\
+            & \texttt{serde2} & 5 & 3.19s & 5.16s & {\color{YellowOrange}x1.62} \\
+            & \texttt{unicode} & 5 & 1.27s & 1.99s & {\color{YellowOrange}x1.57} \\
+            & \texttt{backtraces} & 5 & 4.01s & 5.81s & {\color{YellowOrange}x1.45} \\
+        \hline
+        \multirow{3}{9em}{Stdlib}
+            & \texttt{core} & 1 & 4m31s & 9m15s & {\color{Red}x2.05} \\
+            & \texttt{alloc} & 1 & 4m45s & 5m54s & {\color{LimeGreen}x1.24} \\
+            & \texttt{std/time} & 1 & 15.1s & 17.5s & {\color{LimeGreen}x1.16} \\
+        \hline
+        \multirow{1}{9em}{Regex}
+            & \texttt{lib} & 1 & 13.3s & 20.6s & {\color{YellowOrange}x1.54} \\
+        \multirow{1}{9em}{Hashbrown}
+            & \texttt{lib} & 1 & 31.5s & 38.3s & {\color{LimeGreen}x1.21} \\
+        \multirow{1}{9em}{Tokio}
+            & \texttt{lib} & 1 & 40.7s & 45.3s & {\color{LimeGreen}x1.11} \\
+        \multirow{1}{9em}{Rand}
+            & \texttt{lib} & 1 & 1m24s & 1m31s & {\color{LimeGreen}x1.08} \\
+        \hline
+    \end{tabular}
+    \caption{
+        Benchmarks comparing the execution time of various widely used test suites
+        for Stacked Borrows (SB) or Tree Borrows (TB). The increase in computation time
+        is shown to be rarely more than a factor \(1.5\).
+        The Appendix \ref{app:perf} lists the exact commands that were used for each of these
+        benchmarks.
+    }
+    \label{fig:perf}
+\end{figure}
 
 
-\end{itemize}
 
 \section{Future work}
 
-\subsection{Formalization}
+\subsection{Evaluating Tree Borrows on more real-world code}
+
+Merely evaluating Tree Borrows on the examples outlined in Section \ref{sec:testing_stdlib}
+is not sufficient for a complete picture of how Tree Borrows fits in the Rust
+ecosystem. With the help of \href{https://github.com/rust-lang/crater}{\texttt{crater}}
+we plan to run tests on a much more significant portion of the existing Rust code.
 
 \subsection{Proving optimizations}
 
 We show a sketch of how to use Tree Borrows to prove some reordering-based optimization
-\begin{lstlisting}{language=rust}
+\begin{lstlisting}[language=rust]
 fn example2_unopt(x: &u64) -> u64 {
     let val = *x;
     g(); // unknown code modeled by a function call
@@ -1474,10 +1446,19 @@ We then examine what happens to all borrows for the location:
         The read is thus a no-op.
 \end{itemize}
 
-We thus have shown that in the absence of UB in the source,
+We have thus shown that in the absence of UB in the source,
 \(T(s_0) = T(t_0) \Longrightarrow T(s_3) = T(t_3)\) and
 thus the source and target have the same behavior, and moving a read access
 down across unknown code within a function is a valid optimization.
+
+\subsection{Formalization}
+
+Using the Simuliris framework described in \cite{simuliris} we hope to be able to formally prove the
+above optimization and others. This requires first formalizing Tree Borrows,
+and one difficulty is expected to be the handling of parallelism: since Tree
+Borrows requires but does not implement detection of race conditions, the formalization
+will need to either consider only a sequential language or include a race condition
+detection algorithm from prior work.
 
 
 % ------------------------------------------------------------------------------
@@ -1487,5 +1468,67 @@ down across unknown code within a function is a valid optimization.
 
 \newpage
 \appendix
+
+\section{Benchmarks for Section \ref{sec:perf}}
+\label{app:perf}
+
+The benchmarks from Figure \ref{fig:perf} were executed with the following commands.
+By default Stacked Borrows is used, and Tree Borrows is selected by appending
+\texttt{-Zmiri-tree-borrows} to the list of \texttt{MIRIFLAGS}.
+
+\begin{itemize}
+    \item Miri\\
+        These benchmarks are designed specifically to exhibit pathological behaviors of
+        Stacked Borrows. It happens that many of these are also pathological cases for Tree Borrows,
+        in particular very narrow trees (stack-like, obtained by chaining many reborrows)
+        and very wide trees (obtained by reborrowing many times from the same pointer).
+        It is within expectations that Tree Borrows would perform worse in comparison
+        to Stacked Borrows on these tests than on other tests.
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/miri}{\texttt{github:rust-lang/miri}}
+            \item[Command] \texttt{MIRIFLAGS="" ./miri bench}
+        \end{description}
+    \item Miri-test-libstd\\
+        These tests constitute the OS-independent test suites of the Rust standard library. They
+        are already used to detect regressions in either Miri or Rustc, but this check currently
+        uses Stacked Borrows and not Tree Borrows.
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/miri-test-libstd}{\texttt{github:rust-lang/miri-test-libstd}}
+            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh core --lib --tests}
+            \item[Command] \texttt{MIRIFLAGS="" ./run-test.sh alloc --lib --tests}
+            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation"}\\
+                \texttt{./run-test.sh std --lib --tests -- time::}
+        \end{description}
+    \item Tokio\\
+        This crate is a framework for writing asynchronous code. Since it uses \tcode{unsafe} and
+        parallelism in nontrivial ways, detecting UB is important.
+        \begin{description}
+            \item[Source] \href{https://github.com/tokio-rs/tokio}{\texttt{github:tokio-rs/tokio}}
+            \item[Command] \texttt{MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tag-raw-pointers"} \\
+                \texttt{cargo +nightly miri test --features full --lib}
+        \end{description}
+    \item Rand\\
+        This crate is the most widely used crate for random number generation.
+        Rand is historically relevant to one of the main
+        \href{https://github.com/rust-lang/unsafe-code-guidelines/issues/134}{issues}
+        of Stacked Borrows' handling of out-of-range raw pointers.
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-random/rand}{\texttt{github:rust-random/rand}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
+        \end{description}
+    \item Hashbrown\\
+        This crate implements a high-performance hash map, which naturally involves aliasing and \tcode{unsafe}.
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/hashbrown}{\texttt{github:rust-lang/hashbrown}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
+        \end{description}
+    \item Regex
+        As the name suggests this is a crate for parsing, compiling, and executing regular expressions.
+        The test \texttt{encode\_decode} is ignored because it takes too long for Miri to execute.
+        \begin{description}
+            \item[Source] \href{https://github.com/rust-lang/regex}{\texttt{github:rust-lang/regex}}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib -- --skip encode\_decode}
+        \end{description}
+\end{itemize}
 
 \end{document}
