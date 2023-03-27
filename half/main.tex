@@ -1416,7 +1416,7 @@ fn main() {
 \end{lstlisting}
 
 
-\subsection{Loss of \tperm{Read} permissions}
+\subsection{Loss of read permissions}
 
 A \tperm{Frozen} pointer becoming \tperm{Disabled} is a symptom that a foreign write occured after
 a child read. Indeed a foreign write is only possible cause of the transition in question.
@@ -1444,7 +1444,7 @@ fn main() {
 \end{lstlisting}
 
 
-\subsection{Loss of \tperm{Write} permissions}
+\subsection{Loss of write permissions}
 
 An \tperm{Active} pointer becoming \tperm{Frozen} indicates the presence of a child write
 (requirement for the existence of an \tperm{Active}) and a foreign write (only possible cause
@@ -1558,7 +1558,7 @@ as a full description of Tree Borrows.
         \begin{itemize}
             \item perform the effects of a read access through \tcode{y} on the reborrowed range
             \item add a new child of \tcode{y} in the tree
-            \item give it the permissions \tperm{Reserved = Read + Future Write}
+            \item give it the permissions \tperm{Reserved}
                 (immediately on the reborrowed range, lazily on the rest of the allocation)
             \item keep track of whether it has interior mutability or not
         \end{itemize}
@@ -1566,7 +1566,7 @@ as a full description of Tree Borrows.
         \begin{itemize}
             \item perform the effects of a read access through \tcode{y} on the reborrowed range
             \item add a new child of \tcode{y} in the tree
-            \item give it the permissions \tperm{Frozen = Read + !Write}
+            \item give it the permissions \tperm{Frozen}
                 (immediately on the reborrowed range, lazily on the rest of the allocation)
         \end{itemize}
     \item otherwise give \tcode{z} the same tag as \tcode{y}, they are indistinguishable from now on
@@ -1576,13 +1576,13 @@ as a full description of Tree Borrows.
 \begin{itemize}
     \item for all ancestors \tcode{x} of \tcode{y} (including \tcode{y}), this is a child read
         \begin{itemize}
-            \item assert that \tcode{x} has \tperm{Read} (i.e. is \tperm{Frozen} or \tperm{Reserved} or \tperm{Active})
+            \item assert that \tcode{x} has read permissions (i.e. is \tperm{Frozen} or \tperm{Reserved} or \tperm{Active})
             \item otherwise (if \tcode{x} is \tperm{Disabled}) this is UB
         \end{itemize}
     \item for all non-ancestors \tcode{z} of \tcode{y} (excluding \tcode{y}), this is a foreign read
         \begin{itemize}
-            \item turn \tperm{Write} into \tperm{!Write} (i.e. \tperm{Active -> Frozen}); this is UB if \tcode{z} is protected
-            \item if \tcode{z} is protected, turn \tperm{Future Write} into \tperm{!Write} (i.e. \tperm{Reserved -> Frozen})
+            \item turn \tperm{Active} into \tperm{Frozen}; this is UB if \tcode{z} is protected
+            \item if \tcode{z} is protected, turn \tperm{Reserved} into \tperm{Frozen}
         \end{itemize}
 \end{itemize}
 
@@ -1590,15 +1590,14 @@ as a full description of Tree Borrows.
 \begin{itemize}
     \item for all ancestors \tcode{x} of \tcode{y} (including \tcode{y}), this is a child write
         \begin{itemize}
-            \item turn \tperm{Future Write} into \tperm{Write} (i.e. \tperm{Reserved -> Active})
-            \item it is UB to encounter \tperm{!Write} (either \tperm{Disabled} or \tperm{Frozen})
+            \item turn \tperm{Reserved} into \tperm{Active}
+            \item it is UB to encounter either \tperm{Disabled} or \tperm{Frozen}
         \end{itemize}
     \item for all non-ancestors \tcode{z} of \tcode{y} (excluding \tcode{y}), this is a foreign write
         \begin{itemize}
             \item if \tcode{z} is protected this is always UB; otherwise
             \item if \tcode{z} is \tperm{Reserved} and has interior mutability it is unchanged; otherwise
-            \item turn \tperm{Write} and \tperm{Future Write} into \tperm{!Write} as well as \tperm{Read} into \tperm{!Read}
-                (i.e. \tperm{Reserved -> Disabled} and \tperm{Active -> Disabled} and \tperm{Frozen -> Disabled})
+            \item turn all of \tperm{Reserved}, \tperm{Active}, and \tperm{Frozen} into \tperm{Disabled}.
         \end{itemize}
 \end{itemize}
 
