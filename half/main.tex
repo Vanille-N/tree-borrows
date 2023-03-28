@@ -204,10 +204,10 @@ if the rules are vague then compiler writers are unsure what assumptions they ca
 and language users may accidentally write a program that exhibits UB.
 
 
-An non-negotiable design decision of Rust is that programs that that do not use the
+A non-negotiable design decision of Rust is that programs that that do not use the
 \tcode{unsafe} keyword cannot be declared UB. For \tcode{unsafe} to be useful,
 it should also hold that it is not too difficult to write unsafe Rust that is not
-UB. At the bare minimum, safe code wrapped in an \tcode{unafe} block but that does
+UB. At the bare minimum (but we aim much higher), safe code wrapped in an \tcode{unsafe} block but that does
 not actually use \tcode{unsafe} operations should not be UB. Tree Borrows should thus:
 \begin{itemize}
     \item \textbf{Declare enough programs UB that some useful optimizations are valid.}
@@ -239,6 +239,7 @@ not actually use \tcode{unsafe} operations should not be UB. Tree Borrows should
         This is complemented by a pedagogical effort to write the
         description of Tree Borrows \cite{perso_treebor}
         in a style intended for a non-academic audience familiar with Rust.
+        Early feedback is very positive.
     \item \textbf{Be efficient.} In addition to being humanly understandable, Tree Borrows
         should also be verifiable in practice without too much overhead in Miri.
         We compare it to benchmarks of Stacked Borrows and observe a noticeable slowdown,
@@ -1163,6 +1164,11 @@ Tree Borrows as they have already done for Stacked Borrows.
             & \texttt{lib} & 1 & 40.7s & 45.3s & {\color{LimeGreen}x1.11} \\
         \multirow{1}{9em}{Rand}
             & \texttt{lib} & 1 & 1m24s & 1m31s & {\color{LimeGreen}x1.08} \\
+        \multirow{1}{9em}{Memchr}
+            & \texttt{lib} & 1 & 2.1s & 2.2s & {\color{LimeGreen}x1.05} \\
+        \multirow{1}{9em}{Slotmap}
+            & \texttt{lib} & 1 & {\color{Red}Error} & 18m15s & {\color{LimeGreen}x?} \\
+
         \hline
     \end{tabular}
     \caption{
@@ -1367,12 +1373,27 @@ By default Stacked Borrows is used, and Tree Borrows is selected by appending
             \item[Source] \href{https://github.com/rust-lang/hashbrown}{\texttt{github:rust-lang/hashbrown}}
             \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
         \end{description}
-    \item Regex
+    \item Regex\\
         As the name suggests this is a crate for parsing, compiling, and executing regular expressions.
         The test \texttt{encode\_decode} is ignored because it takes too long for Miri to execute.
         \begin{description}
             \item[Source] \href{https://github.com/rust-lang/regex}{\texttt{github:rust-lang/regex}}
             \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib -- --skip encode\_decode}
+        \end{description}
+    \item Memchr\\
+        High-performance implementation of standard string search primitives.
+        Historically had a conflict with Stacked Borrows as stated in
+        \href{https://github.com/BurntSushi/memchr/issues/58}{Issue \#58}
+        \begin{description}
+            \item[Source] \href{https://github.com/BurntSushi/memchr}{github:BurntSushi/memchr}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test}
+        \end{description}
+    \item Slotmap\\
+        General purpose maps. Currently has an open \href{https://github.com/orlp/slotmap/issues/92}{Issue \#92}
+        showing that some tests contain UB according to Stacked Borrows but not Tree Borrows.
+        \begin{description}
+            \item[Source] \href{https://github.com/orlp/slotmap}{github:orlp/slotmap}
+            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
         \end{description}
 \end{itemize}
 
