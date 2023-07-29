@@ -22,6 +22,7 @@
 \usepackage{bm}
 \usepackage{mathtools}
 \usepackage{subcaption}
+\usepackage{pgfplots}
 
 \usepackage{listings}
 \usepackage{rustlistings}
@@ -149,9 +150,15 @@ fn example1(x: &mut u64, y: &mut u64) -> u64 {
 }
 \end{lstlisting}
 
+The type declaration \tcode{x:\&mut u64} indicates that \tcode{x} is a mutable
+reference to a 64-bit unsigned integer. The type of references in Rust includes
+mutability information, and mutable references \tcode{\&mut u64} are a strict
+supertype of references \tcode{\&u64}.
+
 Because mutable references in safe Rust are unique, \tcode{x} and
-\tcode{y} must point to disjoint regions of memory. In particular the
-instruction \tcode{*y = xval + 1} constitutes a write to \tcode{y}, but it
+\tcode{y} must point to disjoint regions of memory (the type checker must be able to prove
+that any new mutable reference created is disjoint from any other reference still in use).
+In particular the instruction \tcode{*y = xval + 1} constitutes a write to \tcode{y}, but it
 cannot affect the memory covered by \tcode{x}: the value \tcode{*x} is unaffected
 and thus the second read of \tcode{*x} is redundant. This function can be
 optimized to perform fewer operations (two fewer loads) by deleting the second line on which
@@ -460,12 +467,38 @@ fn unreachable_borrow() {
 }
 \end{lstlisting}
 
+One should keep in mind that the role of the Borrow Checker is quite different
+from that of Tree Borrows.
+
+The Borrow Checker
+\begin{itemize}
+    \item must run at compile time;
+    \item must prove that \textit{every} code path is sound;
+    \item cannot be complete due to undecidable properties and must thus
+        have an unsound opt-in escape hatch (\tcode{unsafe}).
+\end{itemize}
+Meanwhile Tree Borrows
+\begin{itemize}
+    \item has additional information that comes with executing at runtime;
+    \item only needs to check if a single provided code path is sound;
+    \item must within these constraints be both sound and complete.
+\end{itemize}
+
+The purpose of Tree Borrows is not to mirror 1-to-1 the behavior of the Borrow
+Checker, the only hard constraint beyond consistency and simplicity is that
+in exclusively-safe code, Tree Borrows must accept at least all the programs
+that the Borrow Checker accepts.
+A much more fair comparison is between Tree Borrows and Stacked Borrows.
+
 \subsection{Stacked Borrows}
 
 Stacked Borrows already adresses the two issues we have raised above with
-why the Borrow Checker is insufficient: it executes at runtime and it handles
+why the Borrow Checker is not the right tool for this job: Stacked Borrows
+executes at runtime and it handles
 \tcode{unsafe} code as well. There are however a few aspects in which
-Stacked Borrows behaves in ways that are too strict or too unpredictable.
+Stacked Borrows behaves in ways that have been argued to be too strict or
+too unpredictable. All of them are documented in various GitHub issues
+or internal discussions in the Rust community.
 
 \paragraph*{Reads should not invalidate other reads.}
 An optimization that should always be possible is to permute two adjacent and independent
@@ -1028,16 +1061,12 @@ We apply the following rules to pointers that have an active protector
 (when the protector is removed upon function exit, these rules no longer apply):
 
 \begin{itemize}
-    \item any transition \tperm{Frozen -> Disabled}, \tperm{Active -> Frozen},
-        \tperm{Active -> Disabled}, \tperm{Reserved -> Disabled} on a permission of a protected
-        pointer is UB;
+    \item any protected tag becoming \tperm{Disabled} is UB;
     \item \tperm{Reserved} is affected by foreign reads and writes regardless of interior mutability,
-        it always becomes \tperm{Frozen} after a foreign read and \tperm{Disabled} after a foreign write.
+        it always becomes \tperm{Frozen} after a foreign read and \tperm{Disabled} after a foreign write;
+    \item \tperm{Active} becomes \tperm{Disabled} instead of \tperm{Frozen} on a foreign read.
 \end{itemize}
 
-In terms of read/write permissions, this means that compared to the previous
-model without protectors, additional UB occurs on any transition that causes
-a loss of read or write permissions.
 The transitions including protectors can be seen in the state automaton of Figure \ref{fig:state-machine}.
 
 \begin{figure}
@@ -1150,6 +1179,7 @@ Tree Borrows as they have already done for Stacked Borrows.
             & \texttt{serde2} & 5 & 3.19s & 5.16s & {\color{YellowOrange}x1.62} \\
             & \texttt{unicode} & 5 & 1.27s & 1.99s & {\color{YellowOrange}x1.57} \\
             & \texttt{backtraces} & 5 & 4.01s & 5.81s & {\color{YellowOrange}x1.45} \\
+            & \texttt{zip-equal} & 5 & ??? & ??? & ??? \\
         \hline
         \multirow{3}{9em}{Stdlib}
             & \texttt{core} & 1 & 4m31s & 9m15s & {\color{Red}x2.05} \\
@@ -1184,18 +1214,183 @@ Tree Borrows as they have already done for Stacked Borrows.
     \label{fig:perf}
 \end{figure}
 
+The \texttt{zip-equal} benchmark above was added after we discovered a pathological
+case in the test suite of the
+\href{https://github.com/hyperium/http/blob/3a2f3e01c01e60b894d1f5b30554013d990010c6/src/header/name.rs#L1685-L1705}{http}
+crate. We were able to \href{https://github.com/rust-lang/miri/pull/2865}{fix the issue}
+(that came from an improper implementation of the tag garbage collector)
+and dramatically improve performance on this specific pattern
+(the bug caused a quadratic blowup of the runtime, which we removed).
 
-
-\section{Future work}
+\section{Future work} % FIXME: no longer future
 
 \subsection{Evaluating Tree Borrows on more real-world code}
 
 Merely evaluating Tree Borrows on the examples shown in Section \ref{sec:testing_stdlib}
 is not sufficient for a complete picture of how Tree Borrows fits in the Rust
-ecosystem. With the help of \href{https://github.com/rust-lang/crater}{\texttt{crater}}
-we plan to run tests on a much more significant portion of the existing Rust code.
+ecosystem.
+
+For this, we can rely on the \texttt{crater} tool and the \href{https://crates.io}{crates.io} repository.
+\texttt{crates.io} is the main official repository of Rust libraries. Most Rust features
+not part of the standard library are published to \texttt{crates.io}, and it even contains some
+better-than-stdlib libraries. In its quality of official collection of user-written Rust code,
+\texttt{crates.io} is often used to detect bugs in the compiler early: since all code published
+to \texttt{crates.io} compiles and passes tests, a simple way to catch backwards incompatibilities
+in new versions of the compiler is to run it on the entire codebase of \texttt{crates.io}.
+The tool that automates running tests on all of \texttt{crates.io} is called \texttt{crater}.
+
+Miri comes with a fine-tuned \href{https://github.com/saethlin/miri-tools}{fork of \texttt{crater}},
+which \href{https://github.com/saethlin}{Ben Kimock} hosts, and using it we obtained the data shown in
+\ref{fig:ubcount}.
+Using this data we can evaluate in advance how difficult it would be for the Rust ecosystem to
+adapt to a new kind of UB: more crates that contain code that Miri considers UB would equate more
+compiler breakage in the future if \texttt{rustc} actually implements Miri-based optimizations.
+
+\begin{figure}
+    \begin{tikzpicture}
+        \begin{axis}[
+                ybar,
+                ymin=0,
+                width=15cm,
+                height=10cm,
+                bar width=20pt,
+                ylabel={Number of crates with UB},
+                nodes near coords,
+         %      nodes near coords align=below, % places labels inside bars
+                symbolic x coords={Aliasing, Uninit, Dangling, Alignment, Race, Layout, Invalid},
+                xtick = data,
+                enlarge y limits={value=0.2,upper},
+                legend pos=north east
+            ]
+            \addplot[fill=blue] coordinates {(Aliasing, 1234) (Uninit, 830) (Dangling, 754) (Alignment, 155) (Race, 63) (Layout, 43) (Invalid, 27)};
+            \addplot[fill=red] coordinates {(Aliasing, 514) (Uninit, 870) (Dangling, 847) (Alignment, 168) (Race, 73) (Layout, 50) (Invalid, 34)};
+            \legend{Miri+SB,Miri+TB}
+        \end{axis}
+    \end{tikzpicture}
+    \caption{
+        As of May 2023 (when the logs were obtained),
+        total number of crates on \href{https://crates.io}{\texttt{crates.io}} (out of 100k)
+        whose test suite contains at least one instance of each kind of UB detected by Miri.\\
+    }
+    \label{fig:ubcount}
+\end{figure}
+
+\begin{paragraph}{In Figure \ref{fig:ubcount}, meaning of columns:}
+    \begin{itemize}
+        \item Aliasing: aliasing UB detected by Stacked Borrows (``Miri+SB'') or Tree Borrows (``Miri+TB'');
+        \item Uninit: read of uninitialized memory;
+        \item Dangling: dangling or null raw pointer used to create a \tcode{Box} or \tcode{\&mut} (should be non-dangling),
+            or dereferencing a dangling pointer;
+        \item Alignment: unaligned raw pointer used to create a \tcode{Box} or \tcode{\&mut} (should be aligned),
+            or dereferencing an unaligned pointer;
+        \item Race: racing accesses to the same data in two threads;
+        \item Layout: violations of calling conventions, attempting to deallocate C heap memory which does not match the Rust heap memory layout, zero-size allocation, ...;
+        \item Invalid: otherwise invalid value constructed (e.g. a \tcode{bool} that is not \tcode{0} or \tcode{1}, enum discriminant that does not exist, unreadable vtable, ...).
+    \end{itemize}
+\end{paragraph}
+
+\begin{paragraph}{Methodology}
+    We have access to \href{https://miri.saethlin.dev/ub}{miri.saethlin.dev} which records the output of Miri with SB
+    on every (100k+) crate on \texttt{crates.io}. We also have an analogue dataset for Miri with TB.
+
+    The dataset consists of a series of records:
+    \begin{itemize}
+        \item a crate name;
+        \item a crate version;
+        \item an output among:
+            \begin{itemize}
+                \item ``Success'', if no error occured;
+                \item ``Timeout'', if the crate exceeded its alloted amount of time to run test;
+                \item ``Error'', if an environment or runtime error occured (e.g. calling a function not supported by Miri);
+                \item ``UB: [list of instances of UB]'', if the crate contains UB in at least one test.
+            \end{itemize}
+    \end{itemize}
+    A crate can contain several instances of UB if different tests each contain UB, but if a single test
+    contains several kinds of UB Miri will only be able to report the first one that occurs.
+    Each (name, version) pair uniquely identifies a crate.
+
+    In order to reduce noise and ensure a fair comparison between Miri+SB and Miri+TB,
+    the dataset was cleaned in the following ways:
+    \begin{itemize}
+        \item Since the Miri+SB and Miri+TB versions were not run at exactly the same time, we first restrict the
+            dataset to only (name, version) pairs that are common across both. This ensures that SB and TB are
+            tested on exactly the same code.
+        \item Crates that timeout in one but not the other are excluded, since it is possible that UB would have occured
+            if the test had ran slightly longer.
+        \item Crates that result in a runtime error in one but not the other are also excluded,
+            since it may be due to being run with different configurations.
+    \end{itemize}
+
+    For the remaining crates, which were all run on both SB and TB and executed all their tests without timing out,
+    we count whether at least one of their tests contains an instance of each kind of UB.
+    If a crate contains one instance of Aliasing UB and one instance of Uninit UB it will be counted in both columns,
+    but if it contains two instances of Aliasing UB then it will only count once towards that number.
+    This reduces the impact of crates that have a lot of tests that all contain exactly the same instance of UB
+    due to calling a common helper function that contains UB.
+\end{paragraph}
+
+\begin{paragraph}{Interpretation}
+    Currently all the crates that appear in this count compile withour error and execute correctly
+    under the official compiler \texttt{rustc}.
+    Miri however is more strict than \texttt{rustc} and considers the amount of crates shown to contain UB of some sort.
+    Therefore each column measures in some sense the amount of backwards incompatibility that would come
+    from the compiler actually performing the related optimizations.
+
+    In the specific case of Stacked and Tree Borrows, we can see that Tree Borrows causes roughly
+    half as many crates to fail than Stacked Borrows, which means that implementing optimizations
+    allowed by Tree Borrows would have much less risk of breaking existing code than optimizations
+    allowed by Stacked Borrows.
+
+    Anectotal evidence from a handful of popular crates suggests that this effect is even more
+    noticeable when authors are actually careful about UB: in the popular crates that contain
+    UB under SB and have actively tried to fix it but failed (\texttt{tokio}, \texttt{pyo3},
+    \texttt{rkyv}, \texttt{eyre}, \texttt{ndarray}, \texttt{arrayvec}, \texttt{slotmap},
+    \texttt{nalgebra}, \texttt{json}), all of them were found to be free of UB under TB.
+\end{paragraph}
+
+\begin{paragraph}{UB Shadowing}
+    The reader may be surprised to see that while Miri+TB has much less Aliasing UB than Miri+SB,
+    it has slightly more of every other kind of UB. There is a very simple explanation for that,
+    simply by virtue of how Miri reports UB.
+
+    In a given test, Miri executes the code until it detects UB, and when it does it aborts the test
+    and outputs an error message. Therefore if a single test contains several instances of UB
+    Miri will only report the first one. Some errors related to e.g. accessing uninitialized memory
+    happen by simple coincidence to also be aliasing errors, or to be preceded chronologically by
+    aliasing errors. This occurs frequently for at least the following reasons: (a) programmers
+    who are not careful about uninitialized memory probably tend to also not be careful about aliasing,
+    and (b) programs that manipulate uninitialized memory definitely use \texttt{unsafe} code and probably
+    use that memory in nontrivial ways, which make aliasing errors more likely.
+
+    There is thus an increased likelyhood in a test for which Miri+SB reports Aliasing UB
+    that it also contains Uninit UB, but the Uninit UB is ``shadowed'' by the Aliasing UB that occurs
+    first. If Miri+TB no longer reports Aliasing UB for that specific test, it still contains Uninit UB.
+    Thus with the move from Miri+SB to Miri+TB, the following happens:
+    \begin{itemize}
+        \item some tests that contain exclusively SB Aliasing UB are removed from the count entirely,
+        \item some tests that contain SB Aliasing UB and also another kind of UB are recategorized under
+            only said other kind.
+    \end{itemize}
+    This accounts for the entirety of the increased counts of every kind of UB other than Aliasing.
+
+    By being more permissive, Tree Borrows thus allows some tests that were
+    thought to contain Aliasing UB to be more accurately recategorized under other kinds of UB.
+
+    The significance of this should not be underestimated: not only does Miri+TB still contain much fewer
+    instances of UB than Miri+SB overall, it may also encourage more crate authors to actually fix the remaining UB.
+    Indeed SB has a reputation for being too strict, and for years now it has been known that SB as it currently
+    is would not become the standard. Programmers that encounter an SB error message may thus tend to automatically
+    dismiss it as a problem for later, or something that will never become the standard anyway.
+    On the other hand it is much more well-known that uninitialized memory could be dangerous immediately,
+    so an Aliasing+Uninit bug is more likely to be fixed if it is classified as Uninit than as Aliasing.
+\end{paragraph}
 
 \subsection{Proving optimizations}
+
+% FIXME: show an invariant, explain how we would use it
+% FIXME: proven: disjointness
+% FIXME: talk about difficulties encountered
+% FIXME: Unique experiments
 
 We show a sketch of how to use Tree Borrows to prove some reordering-based optimization.
 Part of our future work will be an attempt to formalize and generalize the proof that follows
