@@ -23,9 +23,11 @@
 \usepackage{mathtools}
 \usepackage{subcaption}
 \usepackage{pgfplots}
+\usepackage{tikz-cd}
 
 \usepackage{listings}
 \usepackage{rustlistings}
+\usepackage{coqlistings}
 
 \bibliographystyle{plainurl}
 
@@ -108,7 +110,6 @@ Advisor: \textbf{Ralf Jung}
 %\fakeparagraph{Abstract.}
 %\end{myabstract}
 %\medskip
-
 
 \section{Introduction}
 
@@ -258,7 +259,7 @@ not actually use \tcode{unsafe} operations should not be UB. Tree Borrows should
         UB in a program that did not contain any is invalid. If the aliasing model
         is not well enough tuned, this can make some standard optimizations no
         longer valid because the optimized version would contain UB.
-        Stacked Borrows exhibits this behavior: the requirement of uniqueness
+        Stacked Borrows has this flaw: the requirement of uniqueness
         is so strong as to make some reorderings of read-only operations invalid.
         Tree Borrows should preferrably not exhibit the same behavior.
 \end{itemize}
@@ -280,6 +281,81 @@ so the idea of using an aliasing model for optimizations is rather well-establis
 
 The upcoming attempt at formalization is planned to use the Simuliris \cite{simuliris}
 framework.
+
+\subsection{Disambiguation}
+
+As Tree Borrows is a proposal and not an official feature, there is nuance to
+be added to what we will call UB in this document.
+
+A Rust program may exhibit one of the following behaviors:
+\begin{itemize}
+    \item an \textbf{execution error} occurs at runtime, and manifests itself
+        by the program crashing, referred to in Rust lingo as a ``panic''. A panic is
+        \textit{well-defined} behavior and \textit{deterministic}. It is also
+        a very well-controlled kind of crash, that will properly unwind the stack, free
+        memory and display a meaningful error message and backtrace;
+    \item \textbf{nontermination} is also \textit{well-defined} and \textit{deterministic};
+    \item a program may exhibit incorrect behavior in other ways, including having
+        an \textbf{incorrect output} if it fully \textit{executes without error} but prints
+        or returns a \textit{well-formed} but wrong value;
+\end{itemize}
+
+When the Rust compiler compiles a program, it must prove that there are no aliasing conflicts
+in safe code:
+\begin{itemize}
+    \item a \textbf{compilation error} occurs when the Rust compiler is unable to
+        prove that there are no aliasing conflicts, we will often say ``code that compiles''
+        to mean code that does not trigger a compilation error;
+    \item programmers may choose to opt-out of \textit{some} compilation errors in
+        different ways:
+        \begin{itemize}
+            \item some libraries replace compile-time checks with runtime checks, e.g.
+                \texttt{Rc} (reference counting) or \texttt{Mutex} (synchronization),
+                this deterministically transforms a \textit{compilation error} into an
+                \textit{execution error};
+            \item using \texttt{unsafe} directly often ignores these checks entirely,
+                but could sometimes result in data that is not well-formed.
+                This may nondeterministically turn a \textit{compilation error}
+                into a \textit{bug}.
+        \end{itemize}
+    \item if some checks are not performed by one of the above methods,
+        the Rust compiler may still assume that the data is well-formed, which
+        is where \textbf{Undefined Behavior} comes in.
+        UB is not yet fully standardized in Rust, and there are differences betwen
+        (in increasing order of inclusion):
+        \begin{itemize}
+            \item behavior unambiguously Undefined at a level lower than Rust
+                (e.g. LLVM UB or machine UB), such as dereferences of raw pointers or data races;
+            \item behavior officially Undefined in Rust (dereferencing a dangling pointer,
+                unchecked out-of-bounds accesses, unreachable code, uninitialized data);
+            \item behavior that Miri considers Undefined but is not standardized yet,
+                which additionally includes Stacked Borrows and Tree Borrows aliasing UB
+        \end{itemize}
+    \item if a program contains UB it may be \textit{nondeterministically miscompiled}
+        (this is usually phrased as ``the program can have any semantics'', so technically
+        the program is not being miscompiled, but conceptually ``the compiler is correct even
+        if it miscompiles this code'' and ``any compilation of this code is valid'' both have
+        the same outcome that a correct compiler could compile this code in unexpected ways),
+        which could include
+        \begin{itemize}
+            \item seemingly working ``fine'' for now, until a later update of the compiler breaks it;
+            \item corrupted data, that may result in a wrong or coincidentally correct output;
+            \item crashes (including crashes that are not as well-controlled as
+            panics, such as segmentation faults);
+            \item incorrect nontermination.
+        \end{itemize}
+        A program containing UB is unambiguously a bug, and should be fixed even if its output
+        looks correct.
+        The main blocker to adding more UB is to break as little backwards compatibility as possible.
+\end{itemize}
+
+Miri explores a stronger definition of UB than what is standardized (which itself
+is a superset of the UB that the Rust compiler actually takes advantage
+of), in order to anticipate the effects of future strengthenings of the compiler.
+Miri is not a standard, but it may guide future decisions of what the standard should be.
+There does not (for now) exist a tool that checks whether a program contains UB
+according to the standard, as the only full-fledged UB detection tool is Miri which
+is stricter than the standard.
 
 \section{Aliasing in Rust}
 
@@ -370,7 +446,6 @@ let arg2 = ...;
 // two-phase borrow for x_bor ends and actual mutable borrow begins
 X::method(x_bor, arg1, arg2, ...);
 \end{lstlisting}
-% FIXME: box around the zone
 
 As a concrete example, consider
 \begin{lstlisting}[language=rust]
@@ -1173,13 +1248,13 @@ Tree Borrows as they have already done for Stacked Borrows.
         Project & Test & Runs & SB & TB & Factor \\
         \hline
         \multirow{2}{9em}{Miri}
-            & \texttt{slice-get-unchecked} & 5 & 0.56s & 4.15s & {\color{Red}x7.41} \\
-            & \texttt{mse} & 5 & 0.67s & 1.42s & {\color{Red}x2.12} \\
-            & \texttt{serde1} & 5 & 1.53s & 2.60s & {\color{YellowOrange}x1.70} \\
-            & \texttt{serde2} & 5 & 3.19s & 5.16s & {\color{YellowOrange}x1.62} \\
-            & \texttt{unicode} & 5 & 1.27s & 1.99s & {\color{YellowOrange}x1.57} \\
-            & \texttt{backtraces} & 5 & 4.01s & 5.81s & {\color{YellowOrange}x1.45} \\
-            & \texttt{zip-equal} & 5 & ??? & ??? & ??? \\
+            & \texttt{slice-get-unchecked} & 5 & 0.44s & 6.87s & {\color{Red}x15.6} \\
+            & \texttt{zip-equal} & 5 & 1.66s & 5.68s & {\color{Red}x3.42} \\
+            & \texttt{mse} & 5 & 0.45s & 1.48s & {\color{Red}x3.2} \\
+            & \texttt{unicode} & 5 & 1.02s & 1.80s & {\color{YellowOrange}x1.76} \\
+            & \texttt{serde1} & 5 & 1.52s & 2.65s & {\color{YellowOrange}x1.74} \\
+            & \texttt{serde2} & 5 & 3.14s & 5.02s & {\color{YellowOrange}x1.60} \\
+            & \texttt{backtraces} & 5 & 3.02s & 4.83s & {\color{YellowOrange}x1.60} \\
         \hline
         \multirow{3}{9em}{Stdlib}
             & \texttt{core} & 1 & 4m31s & 9m15s & {\color{Red}x2.05} \\
@@ -1196,18 +1271,19 @@ Tree Borrows as they have already done for Stacked Borrows.
             & \texttt{lib} & 1 & 1m24s & 1m31s & {\color{LimeGreen}x1.08} \\
         \multirow{1}{9em}{Memchr}
             & \texttt{lib} & 1 & 2.1s & 2.2s & {\color{LimeGreen}x1.05} \\
-        \multirow{1}{9em}{Slotmap}
-            & \texttt{lib} & 1 & {\color{Red}Error} & 18m15s & {\color{LimeGreen}x?} \\
-
         \hline
     \end{tabular}
     \caption{
-        Benchmarks comparing the execution time of various widely used test suites
-        for Stacked Borrows (SB) or Tree Borrows (TB). The increase in computation time
-        is shown to be rarely a lot more than a factor \(1.5\).
+        Benchmarks comparing the execution time of variouS test suites
+        for Stacked Borrows (SB) or Tree Borrows (TB), including
+        Miri's internal tests, standard library tests, and popular crates.
+        The increase in computation time is shown to be rarely more than a factor
+        \(x1.1\) to \(x1.5\) for real projects, and \(x1.7\) to \(x3\) for worst-case examples.
         Some of these projects use Stacked Borrows as part of their continuous integration
         pipeline, so switching to Tree Borrows is shown to be reasonable in terms of
         additional computational requirement.
+        Overall, Miri itself is the most impacted by the performance of Tree Borrows,
+        since Tree Borrows performs worse on benchmarks than on real-life examples.
         The Appendix \ref{app:perf} lists the commands and sources
         that were used for each of these benchmarks.
     }
@@ -1222,9 +1298,7 @@ crate. We were able to \href{https://github.com/rust-lang/miri/pull/2865}{fix th
 and dramatically improve performance on this specific pattern
 (the bug caused a quadratic blowup of the runtime, which we removed).
 
-\section{Future work} % FIXME: no longer future
-
-\subsection{Evaluating Tree Borrows on more real-world code}
+\subsection{Evaluation of expected backwards-compatibility breakage due to Tree Borrows}
 
 Merely evaluating Tree Borrows on the examples shown in Section \ref{sec:testing_stdlib}
 is not sufficient for a complete picture of how Tree Borrows fits in the Rust
@@ -1342,10 +1416,11 @@ compiler breakage in the future if \texttt{rustc} actually implements Miri-based
     allowed by Stacked Borrows.
 
     Anectotal evidence from a handful of popular crates suggests that this effect is even more
-    noticeable when authors are actually careful about UB: in the popular crates that contain
-    UB under SB and have actively tried to fix it but failed (\texttt{tokio}, \texttt{pyo3},
-    \texttt{rkyv}, \texttt{eyre}, \texttt{ndarray}, \texttt{arrayvec}, \texttt{slotmap},
-    \texttt{nalgebra}, \texttt{json}), all of them were found to be free of UB under TB.
+    noticeable when authors are actually careful about UB (in other words, Stacked Borrows UB
+    has a higher tendency to be hard to avoid even when one is careful about UB):
+    in the reported popular crates that contain UB under SB and have actively tried to fix it but failed
+    (\texttt{tokio}, \texttt{pyo3}, \texttt{rkyv}, \texttt{eyre}, \texttt{ndarray}, \texttt{arrayvec},
+    \texttt{slotmap}, \texttt{nalgebra}, \texttt{json}), all of them were found to be free of UB under TB.
 \end{paragraph}
 
 \begin{paragraph}{UB Shadowing}
@@ -1360,7 +1435,7 @@ compiler breakage in the future if \texttt{rustc} actually implements Miri-based
     aliasing errors. This occurs frequently for at least the following reasons: (a) programmers
     who are not careful about uninitialized memory probably tend to also not be careful about aliasing,
     and (b) programs that manipulate uninitialized memory definitely use \texttt{unsafe} code and probably
-    use that memory in nontrivial ways, which make aliasing errors more likely.
+    use that memory in nontrivial ways, which makes aliasing errors more likely.
 
     There is thus an increased likelyhood in a test for which Miri+SB reports Aliasing UB
     that it also contains Uninit UB, but the Uninit UB is ``shadowed'' by the Aliasing UB that occurs
@@ -1385,16 +1460,41 @@ compiler breakage in the future if \texttt{rustc} actually implements Miri-based
     so an Aliasing+Uninit bug is more likely to be fixed if it is classified as Uninit than as Aliasing.
 \end{paragraph}
 
-\subsection{Proving optimizations}
+\begin{paragraph}{Limitations}
+    There is an obvious bias in evaluating TB only on published crates: this disregards a lot of
+    Rust code that is being written, including most notably (a) closed-source libraries or big
+    projects not published to \texttt{crates.io}, and (b) code written by beginners who do not
+    yet have the knowledge or confidence to publish to \texttt{crates.io}.
+    This bias is likely of minimal consequence, since TB only has an impact on code that uses
+    \texttt{unsafe} Rust, which both of the above categories tend to avoid (beginners do
+    not use \texttt{unsafe} until they have more experience, and large projects still tend out
+    of habit to publish small logical chunks of the parts of their codebase that require \texttt{unsafe}
+    as independent libraries).
 
-% FIXME: show an invariant, explain how we would use it
-% FIXME: proven: disjointness
-% FIXME: talk about difficulties encountered
-% FIXME: Unique experiments
+    A more actionable concern is over the quality of the data we have access to.
+    Out of the 121,164 crates currently published, there are 105,904 that were executed under both
+    Miri+SB and Miri+TB with the same version (during the few weeks that separated the executions
+    of Miri+SB and Miri+TB many crates rolled out a new version that was only tested on Miri+TB).
+    Of them 32,585 must be eliminated because both Miri+SB and Miri+TB timeout or error,
+    but a further 20,410 were removed because only one of Miri+SB or Miri+TB timed out.
+    This leaves a usable dataset of 52,909 points, which wastes about a third of what could be
+    available if we executed Miri+SB and Miri+TB closer in time to each other and paid closer
+    attention to them having otherwise identical configurations.
+
+    The tool that lets us perform these measurements is costly to run (it takes several days to
+    fully execute and generates upwards of 50Gb of logs) and currently under maintenance,
+    but if an opportunity arises to run it once more, we should make sure that fewer data points
+    are wasted due to timeouts and environment errors.
+\end{paragraph}
+
+\subsection{Experiments about \tcode{Unique}}
+% FIXME: fill this
+
+\section{Proving optimizations}
+
+\subsection{Intuition}
 
 We show a sketch of how to use Tree Borrows to prove some reordering-based optimization.
-Part of our future work will be an attempt to formalize and generalize the proof that follows
-as well as others.
 \begin{lstlisting}[language=rust]
 fn example2_unopt(x: &u64) -> u64 {
     let val = *x;
@@ -1494,15 +1594,29 @@ We have thus shown that in the absence of UB in the source,
 thus the source and target have the same behavior, and moving a read access
 down across unknown code within a function is a valid optimization.
 
-\subsection{Formalization}
+\subsection{Formal proofs of disjointness}
 
-Using the Simuliris framework \cite{simuliris} (Simuliris is derived from Iris which is derived from Coq)
-we hope to be able to formally prove the above optimization and others.
-This requires first formalizing Tree Borrows, and one difficulty is expected to be
-the handling of parallelism: since Tree Borrows requires but does not directly implement
-detection of race conditions (race conditions are UB, so the optimizations must
-not introduce race conditions), the formalization will need to either consider
-only a sequential language or include a race condition detection algorithm from prior work.
+%FIXME: link to repo
+After formalizing in Coq the rules of Tree Borrows, we were able to prove
+directly against the operational semantics that
+\begin{itemize}
+    \item if two accesses occur through unrelated pointers without triggering UB and at least one of
+        them is a write then the ranges of memory for these accesses must be disjoint,
+    \item if two consecutive accesses occur on disjoint ranges of memory then they can be permuted
+        and the final state is identical to the one before the permutation,
+    \item two adjacent read accesses can always be permuted.
+\end{itemize}
+
+This proves that Tree Borrows satisfies the minimum requirements of justifying LLVM
+optimizations, since in all cases where LLVM would assume that two pointers point
+to disjoint ranges of memory, said disjointness is a consequence of the absence of
+Tree Borrows UB.
+
+
+\subsection{Invariants}
+% FIXME: do this
+% FIXME: difficulties
+% FIXME: {future} proofs of SB reorderings
 
 
 % ------------------------------------------------------------------------------
@@ -1582,13 +1696,6 @@ By default Stacked Borrows is used, and Tree Borrows is selected by appending
         \begin{description}
             \item[Source] \href{https://github.com/BurntSushi/memchr}{github:BurntSushi/memchr}
             \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test}
-        \end{description}
-    \item Slotmap\\
-        General purpose maps. Currently has an open \href{https://github.com/orlp/slotmap/issues/92}{Issue \#92}
-        showing that some tests contain UB according to Stacked Borrows but not Tree Borrows.
-        \begin{description}
-            \item[Source] \href{https://github.com/orlp/slotmap}{github:orlp/slotmap}
-            \item[Command] \texttt{MIRIFLAGS="" cargo +nightly miri test --lib}
         \end{description}
 \end{itemize}
 
@@ -1816,5 +1923,237 @@ as a full description of Tree Borrows.
             \item turn all of \tperm{Reserved}, \tperm{Active}, and \tperm{Frozen} into \tperm{Disabled}.
         \end{itemize}
 \end{itemize}
+
+
+
+
+\newpage
+\section{Formalization}
+% FIXME: rough idea of Parent-child relationship
+% FIXME: explain bor_step, bor_seq
+% FIXME: show disjointness theorem statement and reordering
+
+We formalize Tree Borrows in Coq using some \texttt{Iris} and \texttt{stdpp} dependencies,
+of which the following is a rephrasing.
+See % FIXME: link to repo
+for the actual formulation.
+
+% preliminaties (accesses, ...)
+
+\newcommand{\kw}[1]{%
+    \csdef{#1}{\textsc{#1}}%
+}
+\newcommand{\field}[1]{%
+    \csdef{#1}{\texttt{#1}}%
+}
+\newcommand{\fn}[1]{%
+    \csdef{#1}{\textit{#1}}%
+}
+
+\kw{Loc}
+\kw{AccessKind} \kw{Read} \kw{Write}
+\kw{AccessRel} \kw{Child} \kw{Foreign}
+\kw{Access}
+\kw{Tag}
+\kw{Permission} \kw{Reserved} \kw{ResIntMut} \kw{Active} \kw{Frozen} \kw{Disabled}
+\kw{LazyPermission}
+\kw{CallID}
+\kw{ProtectorKind} \kw{Strong} \kw{Weak}
+\kw{Protector} \field{kind} \field{call}
+\kw{Item} \field{tg} \field{prot} \field{initperm} \field{perms}
+\kw{Tree}
+\kw{Set}
+\fn{insert} \fn{map} \fn{unique} \fn{related} \fn{fresh}
+\fn{access}
+\kw{Event} \kw{AccessEvt} \kw{InitCallEvt} \kw{EndCallEvt} \kw{RetagEvt}
+\field{locs} \field{cid} \field{parent}
+\fn{disjoint}
+
+\newcommand{\finmap}{\xrightarrow{fin}}
+\newcommand{\borstep}[1]{\xrightarrow[#1]{}}
+\newcommand{\borseq}[2]{\xrightarrow[#1]{#2}}
+
+\subsection{Model encoding}
+
+We use a memory model with locations of type \(\Loc := \mathbb{N} \times \mathbb{Z}\)
+(separated by allocation).
+
+Define the different types of accesses as
+\begin{align*}
+    \AccessKind :=& \set{\Read, \Write} \\
+    \AccessRel :=& \set{\Child, \Foreign} \\
+    \Access :=& \AccessKind \times \AccessRel
+\end{align*}
+
+And the permissions they act upon:
+\begin{align*}
+    \Tag :=& \mathbb{N} \\
+    \CallID :=& \mathbb{N} \\
+    \ProtectorKind :=& \set{\Strong, \Weak} \\
+    \Protector := &\{\kind:\ProtectorKind \\
+                  &| \call:\CallID \\
+                  &\} \\
+    \Permission &:= \set{\Reserved, \ResIntMut, \Active, \Frozen, \Disabled} \\
+    \LazyPermission &:= \Permission \times \text{bool} \\
+    \Item := &\{\tg:\Tag \\
+             &| \prot:\Protector? \\
+             &| \initperm:\Permission \\
+             &| \perms:(\Loc \finmap \LazyPermission) \\
+             &\}
+\end{align*}
+
+We define \(\Tree\) as the set of finite trees with nodes in \(\Item\),
+on which the operations \(\insert : \Tag \to \Item \to \Tree \to \Tree\)
+(inserts the item as a child of every node with a matching tag) and
+\(\map : (\Item \to \Item) \to \Tree \to \Tree\) (applies the function
+to every node of the tree) are defined and satisfy the properties you would
+expect, such as
+\[\forall i\in\Item, t\in\Tag, T\in\Tree.~ i \in \insert~t~i~T\]
+\[\forall f\in(\Item\to\Item), T\in\Tree, i\in\Item.~ i\in T \Rightarrow f~i \in \map~f~T\]
+
+We additionally provide a unicity predicate, as well as the notion of fresh tags:
+\[\text{``}\unique~T~t = i_0\text{''} := \forall i\in T.~ i.\tg = t \Rightarrow i = i_0\]
+\[\fresh_\Tag~T~t := \forall i\in T.~ i.\tg \ne t\]
+\[\fresh_\CallID~T~cid := \forall i\in T.~ i.\prot.\call \ne cid\]
+
+On the trees we can then add a parent-child relationship \(\related~T~t~t'\) when
+every subtree of \(T\) whose root has tag \(t\) contains a node with tag \(t'\).
+Crucially this relationship is transitive and interacts well with insertions in that
+inserting an item with tag \(t'\) as a child of all nodes with tag \(t\) produces
+related \(t\) and \(t'\):
+\begin{align*}
+    &\forall T\in\Tree, i\in\Item, t,t'\in\Tag.\\
+    &\qquad i.\tg = t' \Rightarrow \related~(\insert~t~i~T)~t~t' \\
+    &\qquad i.\tg = t' \Rightarrow \fresh~T~t' \Rightarrow \unique~(\insert~t~i~T)~t' = i
+\end{align*}
+
+After defining the per-location
+\begin{align*}
+    &\access_\LazyPermission : \Set~\CallID \to \Protector? \to \Access \to \LazyPermission \to \LazyPermission \\
+    &\access_\LazyPermission ~cids~prot \\
+    &\qquad\qquad:= \left\{\begin{array}{lll}
+        (\Read,\Foreign)~(\Frozen, init) & \mapsto (\Frozen, init) & \\
+        (\Read,\Child)~(\Frozen, \_) & \mapsto (\Frozen, \textbf{true}) & \\
+        (\Write,\Child)~(\Reserved, \_) & \mapsto (\Active, \textbf{true}) & \\
+        (\Read,\Foreign)~(\Active, init) & \mapsto (\Frozen, init) & \text{if \(prot.\call \not\in cids\)} \\
+        \cdots & &
+    \end{array}\right.
+\end{align*}
+according to the transition function, then the per-item
+\begin{align*}
+    \access_\Item& : \Set~\CallID \to \Set~\Loc \to \Access \to \Item \to \Item \\
+    \access_\Item& ~cids~locs~acc~i \\
+    &:= i.\perms \gets_{\text{foreach}~ locs} \\
+    &\qquad\qquad p \mapsto \access_\LazyPermission~cids~i.\prot~acc~\left(\left\{\begin{array}{ll}
+        p & \text{if \(p\) is defined} \\
+        (i.\initperm, \textbf{false}) & \text{otherwise}
+    \end{array}\right.\right)
+\end{align*}
+that maps to all accessed locations the effects of an \(\Access\) and lazily initializes the
+missing locations, we can define the per-allocation
+\(\access_\Tree\) as
+\begin{align*}
+    \access_\Tree& : \Set~\CallID \to \Set~\Loc \to \Tag \to \AccessKind \to \Tree \to \Tree \\
+    \access_\Tree& ~cids~locs~t'~k~T \\
+    & := \map~\left(i \mapsto \left\{\begin{array}{ll}
+        \access_\Item~cids~locs~(k, \Child)~i & \text{if \(\related~T~i.\tg~t'\)} \\
+        \access_\Item~cids~locs~(k, \Foreign)~i & \text{otherwise}
+    \end{array}\right.\right)~T
+\end{align*}
+
+The above are of course undefined if any UB occurs during the operation.
+
+At this point we are able to prove some properties of note that we mentioned earlier,
+such as idempotency of \(\access\), of which a simplified version can be expressed formally
+as:
+\begin{align*}
+    &\forall k\in\AccessKind, cids\in\Set~\CallID, locs\in\Set~\Loc, t\in\Tag, T,T'\in\Tree,\\
+    &\qquad \access_\Tree~cids~locs~t~k~T = T' \Rightarrow \access_\Tree~cids~locs~t~k~T' = T'
+\end{align*}
+
+Also of note is the property
+\begin{align*}
+    &\forall cids\in\Set~\CallID, locs_1,locs_2\in\Set~\Loc, t_1,t_2\in\Tag, T_0,T_1,T_2\in\Tree,\\
+    \qquad &access_\Tree~cids~locs_1~t_1~\Read~T_0 = T_1 \\
+           &\Rightarrow access_\Tree~cids~locs_2~t_2~\Read~T_1 = T_2 \\
+           &\Rightarrow \exists T'_1\in\Tree, \\
+           &\qquad access_\Tree~cids~locs_2~t_2~\Read~T_0 = T'_1 \\
+           &\qquad \wedge access_\Tree~cids~locs_1~t_1~\Read~T'_1 = T_2
+\end{align*}
+which expresses the following commutation of read accesses:
+\begin{tikzcd}
+    & T_0 \arrow[ld, "{(locs_1, t_1)}" description] \arrow[rd, "{(locs2, t_2)}" description, dashed] &                                                                   \\
+    T_1 \arrow[rd, "{(locs_2,t_2)}" description] & & \exists T'_1 \arrow[ld, "{(locs1,t_1)}" description, dashed] \\
+    & T_2 &
+\end{tikzcd}
+
+\subsection{Step relationship}
+
+In order to define borrow steps, we introduce \(\Event\) and the \(\borstep{e}\) and \(\borseq{es}{I}\) relations.
+
+\begin{align*}
+    \Event := &\{ \AccessEvt(\AccessKind\times\Tag\times\Set~\Loc) \\
+              &| \InitCallEvt(\CallID) \\
+              &| \EndCallEvt(\CallID)\\
+              &| \RetagEvt(\Tag\times\Tag\times\Permission\times\Protector?\times\CallID) \\
+              &\}
+\end{align*}
+
+\(\borstep{e}\) defines the possible steps and the event that they produce:
+\begin{align*}
+    T,cids &\borstep{\AccessEvt(k,t,locs)} T',cids & \text{if \(t\in T\) and \(\access_\Tree~cids~locs~t~k~T = T'\)} \\
+    T,cids &\borstep{\InitCallEvt(cid)} T,cids\cup\set{cid} & \text{if \(cid\not\in cids\) and \(\fresh_\CallID~T~cid\)} \\
+    T,cids &\borstep{\EndCallEvt(cid)} T,cids\setminus\set{\cid} & \text{if \(cid\in cids\)} \\
+    T,cids &\borstep{\RetagEvt(t,t',perm,prot,cid)} T',cids &\text{if \(cid\in cids\) and \(t\in T\) and \(\fresh_\Tag~T~t'\)} \\
+                                                           &&\text{and \(prot.\call\in\set{cid,\text{undefined}}\)} \\
+                                                           &&\text{and \(\insert~t~i~T = T'\)} \\
+                                                           &&\text{where \(i = \{\tg=t'|\prot=prot|\initperm=perm|\perms=\emptyset\}\)}
+\end{align*}
+
+Finally \(\borseq{es}{I}\) is the reflexive and transitive closure of \(\borstep{e}\) enriched with an invariant \(I\):
+
+\begin{align*}
+    T,cids &\borseq{()}{I} T,cids & \text{if \(I~T~cids\)} \\
+    T,cids &\borseq{e\cdot es}{I} T'',cids'' & \text{if \(\exists T',cids'\).} \\
+                                            && \text{s.t. \(I~T~cids\)} \\
+                                            && \text{and \(T,cids \borstep{e} T',cids'\)} \\
+                                            && \text{and \(T',cids' \borseq{es}{I} T'',cids''\)}
+\end{align*}
+
+\subsection{Proof of disjointness for LLVM-style optimizations}
+
+Aliasing-related optimizations applied by LLVM consist of swapping adjacent operations
+when one of them is through a \texttt{noalias} pointer and the other is through a
+pointer not derived from the first. In the case of Tree Borrows this corresponds to
+a protected tag and a non-child tag being both accessed.
+We can express and prove the following theorem that establishes disjointness of sets of
+locations after two write accesses are done through unrelated pointers of which one is
+protected:
+\begin{align*}
+    &\forall prot\in\Protector, perm\in\Permission, t_p,t_x,t_y\in\Tag, cid\in\CallID.\\
+    &\forall T_i,T_f\in\Tree, cids_i,cids_f\in\Set~\CallID, locs_x,locs_y\in\Set~\Loc.\\
+    &\qquad t_y\in T_i \\
+    &\qquad\Rightarrow T_i,cids_i \borseq{es}{I} T_f,cids_f \\
+    &\qquad\Rightarrow \disjoint~locs_x~locs_y \\
+    &where\\
+    &\qquad I~T~cids := cid\in cids \\
+    &\qquad es := (\\
+    &\qquad\qquad \RetagEvt(t_p,t_x,perm,prot,cid),\\
+    &\qquad\qquad \cdots, \\
+    &\qquad\qquad \AccessEvt(\Write,t_x,locs_x), \\
+    &\qquad\qquad \AccessEvt(\Write,t_y,locs_y) \\
+    &\qquad)
+\end{align*}
+
+which proves that if a sequence \textit{retag x, ..., write x, write y} occurs
+while \(x\) is protected, the (assumed) absence of UB implies the disjointness
+of the ranges over which \(x\) and \(y\) were written.
+
+Analogous theorems are stated and proven for all combinations of two accesses
+of which at least one is a \(\Write\).
+
+% commutes
+% final theorem statement
+
 
 \end{document}
