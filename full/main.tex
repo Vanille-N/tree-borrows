@@ -85,6 +85,7 @@
 
 \begin{mycover}
 {\huge\bfseries\boldmath Tree Borrows\par}
+{Oct. 2023 - Jun. 2024, ARPE year at MPI f\"ur Softwaresysteme}
 \bigskip
 \bigskip
 \bigskip
@@ -96,7 +97,7 @@ Author: \textbf{Neven Villani}
 ~\newline
 
 Advisor: \textbf{Derek Dreyer}
-\myaff{MPI for Software Systems}
+\myaff{MPI f\"ur Softwaresysteme}
 
 
 Advisor: \textbf{Ralf Jung}
@@ -1488,7 +1489,34 @@ compiler breakage in the future if \texttt{rustc} actually implements Miri-based
 \end{paragraph}
 
 \subsection{Experiments about \tcode{Unique}}
-% FIXME: fill this
+
+The \tcode{core} library defines a wrapper type around a pointer, \tcode{ptr::Unique<T>} that -- according to
+its own \href{https://doc.rust-lang.org/src/core/ptr/unique.rs.html#11}{documentation} --
+is supposed to logically ``behaves as if it were an instance of \tcode{T}'',
+including having ``the kind of strong aliasing guarantees an instance of \tcode{T} can expect''.
+
+We have naturally decided to experiment to see if TB is suited to specifying the semantics
+of \tcode{Unique}, and have added to Miri
+\href{https://github.com/rust-lang/miri/pull/2936}{experimental support for treating \texttt{Unique}
+the same way as a mutable pointer} (in contrast to the default which is to ignore it
+and not reborrow the inner pointer). \\
+
+We expected to face difficulties during this experiment, because \tcode{Unique} is used internally
+inside \tcode{Vec} (the standard library dynamically-sized array), and a lot of code that uses
+\tcode{Vec} e.g. to implement an arena allocator could run into aliasing issues.
+
+The current version of this experiment was found to be unsound when we discovered a piece
+of safe code that triggers UB under this experimental behavior, so in their current form
+these semantics of \tcode{Unique} cannot be stabilized. Unsurprisingly, this example
+involves tricky interactions between the different components of a \tcode{Vec<Cell<Unique<T>>>},
+that is it combines into one all the difficult cases of interior mutability and uniqueness.
+
+We have ideas on how this could be circumvented (for example \tcode{Unique} could have
+special semantics only when it is protected, or only when it is not also interior
+mutable), but none of them were tested thoroughly enough to become the default in Miri,
+so the current state of experiments around \tcode{Unique} is to be turned off by default.
+Future work may explore further the implications and constraints of enforcing uniqueness
+of \tcode{Unique}.
 
 \section{Proving optimizations}
 
@@ -1596,9 +1624,10 @@ down across unknown code within a function is a valid optimization.
 
 \subsection{Formal proofs of disjointness}
 
-%FIXME: link to repo
-After formalizing in Coq the rules of Tree Borrows, we were able to prove
-directly against the operational semantics that
+After formalizing in Coq the rules of Tree Borrows (Coq code can be found at\\
+\href{https://gitlab.mpi-sws.org/neven/simuliris/-/tree/master/theories/tree_borrows}{\texttt{gitlab.mpi-sws.org/neven/simuliris}},
+explanations also in \ref{app:formalization})
+, we were able to prove directly against the operational semantics that
 \begin{itemize}
     \item if two accesses occur through unrelated pointers without triggering UB and at least one of
         them is a write then the ranges of memory for these accesses must be disjoint,
@@ -1610,14 +1639,85 @@ directly against the operational semantics that
 This proves that Tree Borrows satisfies the minimum requirements of justifying LLVM
 optimizations, since in all cases where LLVM would assume that two pointers point
 to disjoint ranges of memory, said disjointness is a consequence of the absence of
-Tree Borrows UB.
+Tree Borrows UB. And in all cases where LLVM could reorder accesses, the model
+assigns the same final state to both orderings.
 
 
 \subsection{Invariants}
-% FIXME: do this
-% FIXME: difficulties
-% FIXME: {future} proofs of SB reorderings
 
+Another method of proving optimizations is to establish some invariants that
+\begin{itemize}
+    \item hold on an access through a pointer \tcode{x},
+    \item are preserved by every (possibly restricted to foreign) access for \tcode{x},
+    \item allow accessing \tcode{x} again with guarantees on its value.
+\end{itemize}
+
+This is the same method used in \cite{simuliris} to prove Stacked Borrows reorderings,
+and this is the kind of reasoning that it allows: consider the property
+\[F(\text{\tcode{x}}, s) := \text{\tcode{x.permission}} \ne \text{\tcode{Disabled}} \Rightarrow \text{\tcode{x.permission = Frozen}} \wedge \text{\tcode{x.value}} = s\]
+and observe that
+\begin{itemize}
+    \item \(F(\text{\tcode{x}, s})\) holds when a read through \tcode{x} a shared reference succeeds and returns \tcode{s},
+    \item \(F(\text{\tcode{x}, s})\) is preserved by every access that does not trigger UB:
+        \begin{itemize}
+            \item a foreign or child read changes neither the permission nor the value,
+            \item a child write triggers UB because writing through \tcode{Frozen} is forbidden,
+            \item a foreign write makes the precondition false by disabling \tcode{x}.
+        \end{itemize}
+\end{itemize}
+Now consider that if \(F(\text{\tcode{x}}, s)\) holds while the program executes a child read,
+then by assuming that the child read does not trigger UB we get \(\text{\tcode{x.permission}} \ne \text{\tcode{Disabled}}\),
+and this implies \(\text{\tcode{x.value}} = s\).
+
+Thus with this simple invariant we are able to prove that reads through the same shared reference
+must always return the same value, which is instrumental in proving that they can be reordered with other
+operations.
+
+
+This technique -- provided we are able to find sufficiently strong invariants -- should in
+theory allow us to prove the following reorderings:
+\begin{itemize}
+    \item grouping reads (reorder \tcode{read(x); call(); read(x)} into \tcode{read(x); read(x); call()}),
+    \item delaying reads while a protector is active (reorder \tcode{read(x); call()} into \tcode{call(); read(x)}),
+    \item grouping writes while a protector is active (reorder \tcode{write(x); call(); write(x)} into \tcode{write(x); read(x); write()}),
+    \item delaying writes while a protector is active (reorder \tcode{write(x); call()} into \tcode{call(); write(x)}),
+\end{itemize}
+which constitute almost all of the optimizations that were proven for Stacked Borrows using the same method.
+
+We have unfortunately encountered an obstacle in trying to complete these proofs: some of them require
+reasoning about data races, which we do not have the machinery for.
+When we try to reorder \tcode{read(x); call(); read(x)} into \tcode{read(x); read(x); call()}, we need
+to prove that no access races with the second read in the target (after reordering). This intuitively
+just amounts to ``if there was an access that raced with the second read in the target, then because
+there is no thread synchronization between the two read accesses there would already have been a race
+condition with the first read from the source (before reordering): by assuming that the source
+contains no data race UB we get that neither does the target.''
+
+Expressing this formally requires deep changes to the model, that Stacked Borrows has cleverly avoided
+by using a trick that reads that would cause UB instead succeed and return a poison value that only
+triggers UB when actually used. This trick is no longer sufficient in Tree Borrows, and so we would
+need a lot more work to prove the same properties. This is the topic of ongoing work.
+
+
+\section{Conclusion}
+
+I believe that although Tree Borrows is still not precise enough to serve as an official standard,
+we have made great progress towards stabilizing a model for pointer aliasing in Rust that avoids
+the known shortcomings of previous attempts. Feedback from the community suggests that most do indeed
+consider Tree Borrows more intuitive than Stacked Borrows, experimental evidence confirms that
+Tree Borrows is permissive enough not to be a major concern for backwards compatibility if it is
+to ever be enforced, and we have formal proofs that Tree Borrows does permit the optimizations
+that it set out to enable.
+
+There is still much room for future work related to
+\begin{itemize}
+    \item a more thorough look at how interior mutability should be handled consistently,
+    \item whether \tcode{core::ptr::Unique} can be given precise semantics that do not restrict
+        its flexibility too much,
+    \item if spurious writes can ever be allowed without invalidating existing libraries,
+    \item performance improvements and fine-tuning,
+    \item whether reasonings on data races can be bypassed.
+\end{itemize}
 
 % ------------------------------------------------------------------------------
 
@@ -1929,13 +2029,11 @@ as a full description of Tree Borrows.
 
 \newpage
 \section{Formalization}
-% FIXME: rough idea of Parent-child relationship
-% FIXME: explain bor_step, bor_seq
-% FIXME: show disjointness theorem statement and reordering
+\label{app:formalization}
 
 We formalize Tree Borrows in Coq using some \texttt{Iris} and \texttt{stdpp} dependencies,
 of which the following is a rephrasing.
-See % FIXME: link to repo
+See  \href{https://gitlab.mpi-sws.org/neven/simuliris/-/tree/master/theories/tree_borrows}{\texttt{gitlab.mpi-sws.org/neven/simuliris}},
 for the actual formulation.
 
 % preliminaties (accesses, ...)
