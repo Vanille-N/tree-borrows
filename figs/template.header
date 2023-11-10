@@ -4,6 +4,7 @@
 \usepackage{mathrsfs}
 \usepackage{amssymb}
 \usepackage{amsmath}
+\usepackage{anyfontsize}
 \usetikzlibrary{arrows}
 \pagestyle{empty}
 
