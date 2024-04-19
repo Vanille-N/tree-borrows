@@ -99,6 +99,9 @@
 %Curve Lines [id:da5680261275845798] 
 \draw [color={rgb, 255:red, 208; green, 2; blue, 27 }  ,draw opacity=1 ]   (261,85.87) .. controls (261.24,116.71) and (271.42,115.02) .. (291,95.87) .. controls (310.19,77.09) and (309.29,66.47) .. (282.66,64.13) ;
 \draw [shift={(281,64)}, rotate = 4.14] [color={rgb, 255:red, 208; green, 2; blue, 27 }  ,draw opacity=1 ][line width=0.75]    (10.93,-4.9) .. controls (6.95,-2.3) and (3.31,-0.67) .. (0,0) .. controls (3.31,0.67) and (6.95,2.3) .. (10.93,4.9)   ;
+%Curve Lines [id:da8166276639224879] 
+\draw [color={rgb, 255:red, 74; green, 144; blue, 226 }  ,draw opacity=1 ]   (200,140) .. controls (229.58,140.18) and (228.91,130.18) .. (210,110) .. controls (191.47,90.22) and (181.32,90.81) .. (180.07,118.28) ;
+\draw [shift={(180,120)}, rotate = 271.79] [color={rgb, 255:red, 74; green, 144; blue, 226 }  ,draw opacity=1 ][line width=0.75]    (10.93,-4.9) .. controls (6.95,-2.3) and (3.31,-0.67) .. (0,0) .. controls (3.31,0.67) and (6.95,2.3) .. (10.93,4.9)   ;
 
 % Text Node
 \draw (547,150) node [anchor=north west][inner sep=0.75pt]  [color={rgb, 255:red, 245; green, 166; blue, 35 }  ,opacity=1 ] [align=left] {$\displaystyle \downarrow $W};
@@ -178,6 +181,8 @@
 \draw (292,2) node [anchor=north west][inner sep=0.75pt]  [color={rgb, 255:red, 74; green, 144; blue, 226 }  ,opacity=1 ] [align=left] {$\displaystyle \uparrow $R};
 % Text Node
 \draw (291,93.87) node [anchor=north west][inner sep=0.75pt]  [color={rgb, 255:red, 208; green, 2; blue, 27 }  ,opacity=1 ] [align=left] {$\displaystyle \uparrow $W};
+% Text Node
+\draw (212,95) node [anchor=north west][inner sep=0.75pt]  [color={rgb, 255:red, 74; green, 144; blue, 226 }  ,opacity=1 ] [align=left] {$\displaystyle \uparrow $R};
 
 
 \end{tikzpicture}
